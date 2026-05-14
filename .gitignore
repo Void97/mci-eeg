@@ -1,0 +1,24 @@
+# Data
+
+datasets/
+
+# Results
+results/**
+!results/**/*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.eeg-info/
+.env
+venv/
+.venv/
+
+#Jupiter checkpoints
+.ipynb_checkpoints/
+
+#VS Code
+.vscode/
+
+# OS
+.DS_Store
