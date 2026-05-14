@@ -9,7 +9,7 @@ results/**
 # Python
 __pycache__/
 *.py[cod]
-*.eeg-info/
+*.egg-info/
 .env
 venv/
 .venv/
