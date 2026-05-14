@@ -15,7 +15,7 @@ dependencies:
   - openpyxl
   - pip:
       - torch==2.7.1+cu118 --index-url https://download.pytorch.org/whl/cu118
-      - torchvision==0.22.1+cu118
+      - torchvision==0.22.1+cu118 
       - torchaudio==2.7.1+cu118
       - mne==1.9.0
       - captum==0.8.0
