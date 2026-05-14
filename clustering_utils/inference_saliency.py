@@ -3,7 +3,7 @@ import torch
 import json
 import time
 import os
-from captum.attr import Saliency
+from captum.attr import Saliency, InputXGradient, NoiseTunnel, IntegratedGradients
 
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import LabelEncoder
@@ -11,6 +11,31 @@ from torch.utils.data import DataLoader, TensorDataset, Subset
 from utils.tests import test_overlaps
 
 from collections import Counter
+
+GRADIENT_METHODS = ['vanilla', 'input_x_gradient', 'smoothgrad', 'smoothgrad_sq', 'vargrad', 'integrated_gradients']
+
+def _build_attributor(method_name, forward_func):
+    if method_name == 'vanilla':
+        return Saliency(forward_func)
+    elif method_name == 'input_x_gradient':
+        return InputXGradient(forward_func)
+    elif method_name in ('smoothgrad', 'smoothgrad_sq', 'vargrad'):
+        return NoiseTunnel(Saliency(forward_func))
+    elif method_name == 'integrated_gradients':
+        return IntegratedGradients(forward_func)
+    else:
+        raise ValueError(f"Unknown gradient method: {method_name}. Choose from {GRADIENT_METHODS}")
+
+def _attribute(attributor, method_name, bx, target):
+    if method_name == 'vanilla':
+        return attributor.attribute(bx, target=target, abs=False)
+    elif method_name == 'input_x_gradient':
+        return attributor.attribute(bx, target=target)
+    elif method_name in ('smoothgrad', 'smoothgrad_sq', 'vargrad'):
+        return attributor.attribute(bx, nt_type=method_name, nt_samples=50,
+                                    stdevs=0.1, target=target)
+    elif method_name == 'integrated_gradients':
+        return attributor.attribute(bx, target=target, n_steps=50)
 
 def captum_forward(model):
     def forward(x):
@@ -21,7 +46,7 @@ def captum_forward(model):
     return forward
     
 
-def inference(dataset_name, task, model, samples, targets, groups, best_iteration, best_params, random_seeds):
+def inference(dataset_name, task, model, samples, targets, groups, best_iteration, best_params, random_seeds, gradient_method='vanilla'):
     
     
     unique_subjects = np.unique(groups)
@@ -72,7 +97,7 @@ def inference(dataset_name, task, model, samples, targets, groups, best_iteratio
             raise KeyError(f'Weights file {weights_path} not found.')
         
 
-        saliency_inst = Saliency(captum_forward(net))
+        saliency_inst = _build_attributor(gradient_method, captum_forward(net))
         net.to(device)
         net.eval()
         fold_gradients = []
@@ -95,11 +120,8 @@ def inference(dataset_name, task, model, samples, targets, groups, best_iteratio
 
             target = by.detach().cpu().long().tolist()
             fold_gradients.append(
-                saliency_inst.attribute(bx, 
-                    target=target,
-                    abs=False
-                    ).detach().cpu().numpy())
-        
+                _attribute(saliency_inst, gradient_method, bx, target).detach().cpu().numpy()
+            )
         fold_gradients = np.concatenate(fold_gradients, axis = 0)
 
         print(f'Fold {fold + 1} gradients shape: {fold_gradients.shape}')
@@ -170,7 +192,7 @@ def inference(dataset_name, task, model, samples, targets, groups, best_iteratio
     # print(f'Subject IDs: {subject_ids_list}')
 
     np.save(
-        os.path.join(save_dir, f'{dataset_name}_{task}_{model["name"]}_iteration_{best_iteration}_saliency_maps.npy'), 
+        os.path.join(save_dir, f'{dataset_name}_{task}_{model["name"]}_iteration_{best_iteration}_{gradient_method}_saliency_maps.npy'),
         gradients_list
     )
 

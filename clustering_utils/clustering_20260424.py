@@ -51,11 +51,12 @@ class FeaturePreprocessor:
 
 class Visualizer:
     def __init__(self, dataset_name, task, model_name,
-                 best_iteration, output_dir='results/clustering'):
+                 best_iteration, gradient_method='vanilla', output_dir='results/clustering'):
         self.dataset_name = dataset_name
         self.task = task
         self.model_name = model_name
         self.best_iteration = best_iteration
+        self.gradient_method = gradient_method
         self.output_dir = output_dir
 
     def _get_base_path(self):
@@ -115,7 +116,7 @@ class Visualizer:
         savepath = os.path.join(
             path,
             f'{self.dataset_name}_{self.task}_{self.model_name}'
-            f'_iteration_{self.best_iteration}_dendrogram.png'
+            f'_iteration_{self.best_iteration}_{self.gradient_method}_dendrogram.png'
         )
         plt.tight_layout()
         plt.savefig(savepath, bbox_inches='tight')
@@ -156,7 +157,7 @@ class Visualizer:
         filepath = os.path.join(
             self._get_base_path(),
             f'{self.dataset_name}_{self.task}_{self.model_name}'
-            f'_iteration_{self.best_iteration}_hierarchical.png'
+            f'_iteration_{self.best_iteration}_hierarchical_{self.gradient_method}.png'
         )
         plt.title(
             f'Hierarchical Clustering: {self.dataset_name}, {self.task}, '
@@ -282,16 +283,17 @@ class Logs:
 
 
 class Pipeline:
-    def __init__(self, dataset_name, task, model_name, best_iteration, bands):
+    def __init__(self, dataset_name, task, model_name, best_iteration, bands, gradient_method='vanilla'):
         self.dataset_name = dataset_name
         self.task = task
         self.model_name = model_name
         self.best_iteration = best_iteration
         self.bands = bands
+        self.gradient_method = gradient_method
 
         self.psd_converter = PSDConverter()
         self.feature_preprocessor = FeaturePreprocessor()
-        self.visualizer = Visualizer(dataset_name, task, model_name, best_iteration)
+        self.visualizer = Visualizer(dataset_name, task, model_name, best_iteration, gradient_method)
         self.logs = Logs()
         self.clustering_strategy = HierarchicalClustering()
 
@@ -320,7 +322,7 @@ class Pipeline:
         metrics.update(cluster_counts)
 
         self.logs.save_logs(self.dataset_name, self.task, self.model_name,
-                            self.best_iteration, 'hierarchical', metrics)
+                            self.best_iteration, f'hierarchical_{self.gradient_method}', metrics)
 
         self.visualizer.visualize_clusters(processed_features, cluster_labels, subject_ids_list)
 

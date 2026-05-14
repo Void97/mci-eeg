@@ -10,7 +10,7 @@ from main_func_111125 import build, generate_seeds, labels_mapping, filter_data
 from models.models_base.models_list import single_model
 from utils.EEG_preprocess import load_preprocessed
 from clustering_utils.best_iteration import find_best_iteration
-from clustering_utils.inference_saliency import inference
+from clustering_utils.inference_saliency import inference, GRADIENT_METHODS
 from clustering_utils.clustering_20260424 import Pipeline
 from clustering_utils.cluster_interpretation import plot_cluster_psd_topomaps, plot_cluster_subject_psd_curves
 
@@ -18,10 +18,14 @@ def main():
 
     parser = argparse.ArgumentParser(description='Subgroup Clustering for MCI EEG data')
     parser.add_argument('--dataset', type=str, help='Name of the dataset to use')
+    parser.add_argument('--gradient', type=str, default='vanilla', choices=GRADIENT_METHODS,
+                        help=f'Gradient attribution method for saliency maps. '
+                             f'Available: {", ".join(GRADIENT_METHODS)}')
 
     args = parser.parse_args()
 
     dataset_name = args.dataset
+    gradient_method = args.gradient
 
     bands = {
         'delta': [0, 4],
@@ -65,16 +69,18 @@ def main():
 
         gradients_list, negative_gradients_list, subject_ids_list, negative_subject_ids_list = inference(dataset_name, task, model,
                                                                                                         samples, targets, groups,
-                                                                                                        best_iteration, best_params, random_seeds)
+                                                                                                        best_iteration, best_params, random_seeds,
+                                                                                                        gradient_method=gradient_method)
 
-        clustering_pipeline = Pipeline(dataset_name, task, model['name'], best_iteration, bands)
+        clustering_pipeline = Pipeline(dataset_name, task, model['name'], best_iteration, bands, gradient_method=gradient_method)
         cluster_labels = clustering_pipeline.run(gradients_list, subject_ids_list)
 
+        clustering_label = f'hierarchical_{gradient_method}'
         plot_cluster_psd_topomaps(dataset_name, task, model['name'], best_iteration,
-                                  'hierarchical', gradients_list, cluster_labels,
+                                  clustering_label, gradients_list, cluster_labels,
                                   ch_names, show_channel, subject_ids_list, func='topo', sfreq=200)
         plot_cluster_subject_psd_curves(dataset_name, task, model['name'], best_iteration,
-                                        'hierarchical', gradients_list, negative_gradients_list,
+                                        clustering_label, gradients_list, negative_gradients_list,
                                         cluster_labels, ch_names, subject_ids_list,
                                         negative_subject_ids_list, func='curve', sfreq=200)
 
