@@ -10,27 +10,24 @@ from main_func_111125 import build, generate_seeds, labels_mapping, filter_data
 from models.models_base.models_list import single_model
 from utils.EEG_preprocess import load_preprocessed
 from clustering_utils.best_iteration import find_best_iteration
-from clustering_utils.inference_saliency import inference 
+from clustering_utils.inference_saliency import inference
 from clustering_utils.clustering_20260424 import Pipeline
-from clustering_utils.cluster_interpretation import plot_cluster_psd_topomaps, plot_subject_psd_topomaps, plot_cluster_subject_psd_curves
+from clustering_utils.cluster_interpretation import plot_cluster_psd_topomaps, plot_cluster_subject_psd_curves
 
 def main():
 
-    #dataset_name = 'GENEEG'
     parser = argparse.ArgumentParser(description='Subgroup Clustering for MCI EEG data')
     parser.add_argument('--dataset', type=str, help='Name of the dataset to use')
-    parser.add_argument('--clustering', type=str, help='Select clustering method: agglomerative, hdbscan, gaussian, spectral')
 
     args = parser.parse_args()
 
     dataset_name = args.dataset
-    clustering_method = args.clustering
 
     bands = {
-        'delta': [0, 4], 
-        'theta': [4, 8], 
+        'delta': [0, 4],
+        'theta': [4, 8],
         'alpha': [8, 12],
-        'beta': [12, 30], 
+        'beta': [12, 30],
         'gamma': [30, 45]
     }
 
@@ -49,14 +46,13 @@ def main():
         filtered_subjects, filtered_labels = filter_data(subjects_list, labels_list, labels_map)
 
         label_dict = dict(zip(filtered_subjects, filtered_labels))
-        #print(f'Label dict: {label_dict}')
 
         samples, targets, groups = load_preprocessed(preprocessed_dir, labels_map, label_dict)
         print(f'Samples size: {samples.shape}, Targets size: {targets.shape}, Groups size: {groups.shape}')
         print(groups)
         print(f"Types - Samples: {type(samples)}, Targets: {type(targets)}, Groups: {type(groups)}")
-       
-        
+
+
         model = single_model(num_classes=2, num_channels=ch_num, time_points=samples.shape[2])
         print(f"The model {model['name']} is built successfully!")
 
@@ -67,30 +63,20 @@ def main():
         print(f"Best params for dataset: {dataset_name}, task: {task}, model: {model['name']} - {best_params}")
         print('---------------------------------------------')
 
-        gradients_list, negative_gradients_list, subject_ids_list, negative_subject_ids_list = inference(dataset_name, task, model, 
-                                                                                                        samples, targets, groups, 
+        gradients_list, negative_gradients_list, subject_ids_list, negative_subject_ids_list = inference(dataset_name, task, model,
+                                                                                                        samples, targets, groups,
                                                                                                         best_iteration, best_params, random_seeds)
-        exit()
-        
-        clustering_pipeline = Pipeline(dataset_name, task, model['name'], best_iteration, clustering_method, bands)
+
+        clustering_pipeline = Pipeline(dataset_name, task, model['name'], best_iteration, bands)
         cluster_labels = clustering_pipeline.run(gradients_list, subject_ids_list)
-        
-        if dataset_name == 'CAUEEG':
-            plot_cluster_psd_topomaps(dataset_name, task, model['name'], best_iteration, 
-                                      clustering_method, gradients_list, cluster_labels, 
-                                      ch_names, show_channel, subject_ids_list, func='topo', sfreq=200)
-            plot_cluster_subject_psd_curves(dataset_name, task, model['name'], best_iteration, 
-                                            clustering_method, gradients_list, negative_gradients_list, 
-                                            cluster_labels, ch_names, subject_ids_list, 
-                                            negative_subject_ids_list, func='curve', sfreq=200)
-        else:
-            plot_subject_psd_topomaps(dataset_name, task, model['name'], best_iteration, 
-                                      clustering_method, gradients_list, cluster_labels, 
-                                      ch_names, show_channel, subject_ids_list, func='topo', sfreq=200)
-            plot_cluster_subject_psd_curves(dataset_name, task, model['name'], best_iteration, 
-                                            clustering_method, gradients_list, negative_gradients_list, 
-                                            cluster_labels, ch_names, subject_ids_list, 
-                                            negative_subject_ids_list, func='curve', sfreq=200)
+
+        plot_cluster_psd_topomaps(dataset_name, task, model['name'], best_iteration,
+                                  'hierarchical', gradients_list, cluster_labels,
+                                  ch_names, show_channel, subject_ids_list, func='topo', sfreq=200)
+        plot_cluster_subject_psd_curves(dataset_name, task, model['name'], best_iteration,
+                                        'hierarchical', gradients_list, negative_gradients_list,
+                                        cluster_labels, ch_names, subject_ids_list,
+                                        negative_subject_ids_list, func='curve', sfreq=200)
 
 if __name__ == "__main__":
     main()

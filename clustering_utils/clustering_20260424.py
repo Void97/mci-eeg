@@ -1,30 +1,21 @@
 import os
 import numpy as np
-import hdbscan
 import json
 
-
 from sklearn.preprocessing import normalize
-from sklearn.metrics.pairwise import cosine_distances
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import AgglomerativeClustering, SpectralClustering, KMeans
-from sklearn.decomposition import PCA
-from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
 from sklearn.manifold import TSNE
 from matplotlib import legend, pyplot as plt
 from scipy.signal import welch
+from scipy.cluster.hierarchy import linkage, fcluster, dendrogram as scipy_dendrogram
 from abc import ABC, abstractmethod
 
-from clustering_utils import best_iteration
 
 class PSDConverter:
-    #Convert saliency maps to PSD features
     def __init__(self, sfreq=200):
         self.sfreq = sfreq
-    
+
     def extract_band_psd(self, freqs, psd, bands):
-        
         band_psd_sub = []
         for band in bands:
             fmin, fmax = bands[band]
@@ -34,9 +25,8 @@ class PSDConverter:
                 band_mask = (freqs >= fmin) & (freqs < fmax)
             band_psd_sub.append(psd[:, band_mask].sum(axis=1))
         return np.array(band_psd_sub).T
-    
-    def convert(self, saliency_maps, bands):
 
+    def convert(self, saliency_maps, bands):
         welch_saliency_maps = []
         for saliency_map in saliency_maps:
             freqs, psd = welch(
@@ -46,61 +36,104 @@ class PSDConverter:
                 nperseg=self.sfreq,
                 noverlap=self.sfreq // 2
             )
-        
             psd = psd / (psd.sum() + 1e-8)
-            #minmax
-            #psd = (psd - psd.min()) / (psd.max() - psd.min() + 1e-8)
             band_psd_sub = self.extract_band_psd(freqs, psd, bands)
             welch_saliency_maps.append(band_psd_sub)
         return np.array(welch_saliency_maps)
 
+
 class FeaturePreprocessor:
-    #Preprocess PSD features: flattening, scaling, PCA, L2 normalization
-    def __init__(self, pca_variance=0.9):
-        self.pca_variance = pca_variance
-        self.scaler = StandardScaler()
-        self.pca = PCA(n_components=self.pca_variance, random_state=42)
-    
     def preprocess(self, saliency_maps):
-        
-        flat_saliency_maps = saliency_maps.reshape(saliency_maps.shape[0], -1)
-        print(f"Flat saliency maps shape: {flat_saliency_maps.shape}")
-        saliency_maps_scaled = self.scaler.fit_transform(flat_saliency_maps)
-        saliency_maps_reduced = self.pca.fit_transform(saliency_maps_scaled)
-        #saliency_maps_normalized = normalize(saliency_maps_reduced, norm='l2')
-        return saliency_maps_reduced, saliency_maps_reduced
+        flat = saliency_maps.reshape(saliency_maps.shape[0], -1)
+        print(f"Flat saliency maps shape: {flat.shape}")
+        return normalize(flat, norm='l2')
+
 
 class Visualizer:
-
     def __init__(self, dataset_name, task, model_name,
-                 best_iteration, clustering_method, output_dir='results/clustering'):
-        
+                 best_iteration, output_dir='results/clustering'):
         self.dataset_name = dataset_name
         self.task = task
         self.model_name = model_name
         self.best_iteration = best_iteration
-        self.clustering_method = clustering_method
         self.output_dir = output_dir
 
-    def get_save_path(self):
+    def _get_base_path(self):
         path = f'{self.output_dir}/{self.dataset_name}'
-        if not os.path.exists(path):
-            os.makedirs(path)
-        filepath = os.path.join(path, f'{self.dataset_name}_{self.task}_{self.model_name}_iteration_{self.best_iteration}_{self.clustering_method}.png')
-        return filepath
-    
-    def visualize_clusters(self, features, cluster_labels, 
-                           subjects_ids_list):
-        
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def save_dendrogram(self, linkage_matrix, subject_ids, n_clusters, cut_threshold, cluster_labels):
+        path = os.path.join(self._get_base_path(), 'dendrograms')
+        os.makedirs(path, exist_ok=True)
+
+        n = len(subject_ids)
+        fig_width = max(12, n * 0.6)
+        fig, ax = plt.subplots(figsize=(fig_width, 8))
+
+        labels = [str(s.item() if hasattr(s, 'item') else s) for s in subject_ids]
+        dend = scipy_dendrogram(
+            linkage_matrix,
+            labels=labels,
+            ax=ax,
+            leaf_rotation=90,
+            color_threshold=cut_threshold,
+            above_threshold_color='gray'
+        )
+
+        # Color each leaf label by its flat cluster assignment
+        cmap = plt.cm.tab10
+        leaf_order = dend['leaves']  # original indices left→right in the dendrogram
+        for tick, leaf_idx in zip(ax.get_xticklabels(), leaf_order):
+            tick.set_color(cmap(cluster_labels[leaf_idx] / max(n_clusters - 1, 1)))
+
+        ax.axhline(
+            y=cut_threshold, color='red', linestyle='--', linewidth=1.5,
+            label='Cut threshold'
+        )
+
+        cluster_handles = [
+            plt.Line2D([0], [0], marker='o', color='w',
+                       markerfacecolor=cmap(c / max(n_clusters - 1, 1)),
+                       markersize=10, label=f'Cluster {c}')
+            for c in range(n_clusters)
+        ]
+        cluster_handles.append(
+            plt.Line2D([0], [0], color='red', linestyle='--', linewidth=1.5,
+                       label=f'Cut threshold ({n_clusters} clusters)')
+        )
+        ax.legend(handles=cluster_handles, fontsize=10)
+
+        ax.set_title(
+            f'Hierarchical Clustering Dendrogram\n'
+            f'{self.dataset_name} — {self.task} ({n_clusters} clusters)',
+            fontsize=14
+        )
+        ax.set_xlabel('Subject ID')
+        ax.set_ylabel('Distance')
+
+        savepath = os.path.join(
+            path,
+            f'{self.dataset_name}_{self.task}_{self.model_name}'
+            f'_iteration_{self.best_iteration}_dendrogram.png'
+        )
+        plt.tight_layout()
+        plt.savefig(savepath, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved dendrogram to {savepath}")
+
+    def visualize_clusters(self, features, cluster_labels, subject_ids_list):
         perplexity = min(5, len(features) - 1)
         tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
         features_2d = tsne.fit_transform(features)
 
         plt.figure(figsize=(8, 6))
-        scatter = plt.scatter(features_2d[:, 0], features_2d[:, 1],
-                              c=cluster_labels, cmap='viridis', alpha=0.7)
+        scatter = plt.scatter(
+            features_2d[:, 0], features_2d[:, 1],
+            c=cluster_labels, cmap='viridis', alpha=0.7
+        )
 
-        for i, txt in enumerate(subjects_ids_list):
+        for i, txt in enumerate(subject_ids_list):
             plt.annotate(
                 text=str(txt.item() if hasattr(txt, 'item') else txt),
                 xy=(features_2d[i, 0], features_2d[i, 1]),
@@ -108,31 +141,36 @@ class Visualizer:
                 textcoords='offset points',
                 ha='center',
                 fontsize=8,
-                alpha=0.8)
-                
-        
-        legend = plt.legend(
+                alpha=0.8
+            )
+
+        leg = plt.legend(
             *scatter.legend_elements(),
             title='Clusters',
             loc='upper right',
             bbox_to_anchor=(1.12, 1),
             borderaxespad=0
         )
-        plt.gca().add_artist(legend)
+        plt.gca().add_artist(leg)
 
-        savepath = self.get_save_path()
-        plt.title(f'Clustering {self.clustering_method}: {self.dataset_name}, {self.task}, {self.model_name} (Iteration: {self.best_iteration})') 
+        filepath = os.path.join(
+            self._get_base_path(),
+            f'{self.dataset_name}_{self.task}_{self.model_name}'
+            f'_iteration_{self.best_iteration}_hierarchical.png'
+        )
+        plt.title(
+            f'Hierarchical Clustering: {self.dataset_name}, {self.task}, '
+            f'{self.model_name} (Iteration: {self.best_iteration})'
+        )
         plt.xlabel('t-SNE Dimension 1')
         plt.ylabel('t-SNE Dimension 2')
-        #plt.colorbar(scatter, label='Cluster Label')
         plt.grid(True)
-        #plt_path = f'results/clustering/{self.dataset_name}/{self.dataset_name}_{self.task}_{self.model_name}_iteration_{self.best_iteration}_fold_{self.fold}_{self.clustering_method}.png'
-        plt.savefig(savepath)
-        print(f"Saved clustering visualization to {savepath}")
+        plt.savefig(filepath)
+        print(f"Saved clustering visualization to {filepath}")
         plt.close()
 
-class ClusteringStrategy(ABC):
 
+class ClusteringStrategy(ABC):
     @abstractmethod
     def cluster(self, features, dataset_name=None):
         pass
@@ -141,139 +179,90 @@ class ClusteringStrategy(ABC):
     def get_metrics(self, features, labels):
         pass
 
-class HDBSCAN(ClusteringStrategy):
-    def __init__(self, default_mincluster_size = 3, default_min_samples = 3):
-        self.default_mincluster_size = default_mincluster_size
-        self.default_min_samples = default_min_samples 
-        self.noise_count = 0
-    
+
+class HierarchicalClustering(ClusteringStrategy):
+    """
+    Ward hierarchical clustering via scipy.cluster.hierarchy.
+    Cluster count is determined automatically from the largest gap
+    between consecutive merge distances in the dendrogram.
+    """
+
+    def __init__(self, method='complete', metric='cosine'):
+        self.method = method
+        self.metric = metric
+        self.linkage_matrix = None
+        self.n_clusters = None
+        self.cut_threshold = None
+
+    def _find_n_clusters(self, linkage_matrix):
+        n = len(linkage_matrix) + 1
+        if n <= 3:
+            return 2
+
+        distances = linkage_matrix[:, 2]
+        # Second derivative of merge distances: finds where growth accelerates most,
+        # rather than just the single largest gap (which almost always gives 2 clusters)
+        acceleration = np.diff(distances, 2)
+        # Argmax from the right: large distances = few clusters
+        rev_idx = int(np.argmax(acceleration[::-1]))
+        k = rev_idx + 2
+        return max(2, min(k, 10))
+
     def cluster(self, features, dataset_name=None):
+        self.linkage_matrix = linkage(features, method=self.method, metric=self.metric)
+        self.n_clusters = self._find_n_clusters(self.linkage_matrix)
 
-        if dataset_name == 'CAUEEG':
-            min_cluster_size = 9
-            min_samples = 5
+        # Cut threshold: midpoint between the two merges that bound the chosen cut
+        distances = self.linkage_matrix[:, 2]
+        n = len(distances) + 1
+        cut_lower = n - self.n_clusters - 1
+        cut_upper = n - self.n_clusters
+        if 0 <= cut_lower and cut_upper < len(distances):
+            self.cut_threshold = (distances[cut_lower] + distances[cut_upper]) / 2
         else:
-            min_cluster_size = self.default_mincluster_size
-            min_samples = self.default_min_samples
+            self.cut_threshold = distances[-self.n_clusters + 1]
 
-        clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples)
-        cluster_labels = clusterer.fit_predict(features)
-        self.noise_count = np.sum(cluster_labels == -1)
+        cluster_labels = fcluster(
+            self.linkage_matrix, t=self.cut_threshold, criterion='distance'
+        ) - 1  # 0-indexed
+
+        actual_k = len(np.unique(cluster_labels))
+        if actual_k != self.n_clusters:
+            print(f"Note: expected {self.n_clusters} clusters, got {actual_k}.")
+            self.n_clusters = actual_k
+
+        print(f"Hierarchical clustering: {self.n_clusters} clusters "
+              f"(cut threshold: {self.cut_threshold:.4f})")
         return cluster_labels
 
-    def get_metrics(self, features, cluster_labels):
-
-        valid_mask = cluster_labels != -1
-        valid_labels = cluster_labels[valid_mask]
-        n_clusters = len(np.unique(valid_labels))
-        n_noise = np.sum(cluster_labels == -1)
-        print(f"HDBSCAN results for all folds - Number of clusters: {n_clusters}, Number of noise points: {n_noise}")
-        
-        if n_clusters >= 2 and valid_mask.sum() > 1:
-            return {
-                'n_clusters': int(n_clusters),
-                'n_noise': int(n_noise),
-                'silhouette_score': float(silhouette_score(features[valid_mask], valid_labels, metric='euclidean')),
-                'davies_bouldin_score': float(davies_bouldin_score(features[valid_mask], valid_labels)),
-                'calinski_harabasz_score': float(calinski_harabasz_score(features[valid_mask], valid_labels))
-            }
-        else:
-            return {}
-
-class Agglomerative(ClusteringStrategy):
-    def __init__(self, max_cluster=10, linkage='average'):
-        self.max_cluster = max_cluster
-        self.linkage = linkage
-        self.best_k = None
-        self.best_score = -1
-    
-    def cluster(self, features, dataset_name=None):
-        
-        max_k = min(10, len(features) - 1)
-        for k in range(2, max_k + 1):
-            clusters = AgglomerativeClustering(n_clusters=k, metric='euclidean', linkage=self.linkage)
-            cluster_labels = clusters.fit_predict(features)
-            score = silhouette_score(features, cluster_labels, metric='euclidean')
-            print(f"Number of clusters: {k}, Silhouette Score: {score:.4f}")
-            if score > self.best_score:
-                self.best_score = score
-                self.best_k = k
-            print(f"Best number of clusters updated to: {self.best_k} with Silhouette Score: {self.best_score:.4f}")
-        final_clusters = AgglomerativeClustering(n_clusters=self.best_k, metric='euclidean', linkage=self.linkage)
-        return final_clusters.fit_predict(features)
-    
     def get_metrics(self, features, labels):
         if len(set(labels)) >= 2:
             return {
                 'n_clusters': int(len(set(labels))),
-                'silhouette_score': float(silhouette_score(features, labels, metric='euclidean')),
+                'silhouette_score': float(silhouette_score(features, labels, metric='cosine')),
                 'davies_bouldin_score': float(davies_bouldin_score(features, labels)),
                 'calinski_harabasz_score': float(calinski_harabasz_score(features, labels))
             }
         return {}
 
-class GMM(ClusteringStrategy):
-    def __init__(self, max_components=10, covariance_type = 'spherical'):
-        self.max_components = max_components
-        self.covariance_type = str(covariance_type)
-        self.best_gmm = None
-        self.lowest_bic = np.inf
-
-    def cluster(self, features, dataset_name=None):
-        
-        for n_components in range(1, self.max_components):
-            gmm = GaussianMixture(n_components=n_components, 
-                                  covariance_type=self.covariance_type)
-            gmm.fit(features)
-            bic = gmm.bic(features)
-            print(f'Number of components: {n_components}, BIC: {bic:.4f}')
-            if bic < self.lowest_bic:
-                self.lowest_bic = bic
-                self.best_gmm = gmm
-                print(f'Best number of components updated to: {n_components} with BIC: {self.lowest_bic:.4f}')
-        return self.best_gmm.predict(features)
-
-    def get_metrics(self, features, labels):
-        
-        if self.best_gmm.n_components >= 2:
-            return {
-                'n_clusters': int(self.best_gmm.n_components),
-                'bic': float(self.lowest_bic),
-                'silhouette_score': float(silhouette_score(features, labels, metric='euclidean')),
-                'davies_bouldin_score': float(davies_bouldin_score(features, labels)),
-                'calinski_harabasz_score': float(calinski_harabasz_score(features, labels))
-            }
-        return {}
 
 class Logs:
-
     def __init__(self):
         self.logs = {}
-    
+
     def analyze_clusters(self, cluster_labels):
-        
-        unique_labels, counts = np.unique(cluster_labels,return_counts=True)
+        unique_labels, counts = np.unique(cluster_labels, return_counts=True)
         results = {}
-        
-        for label, count in enumerate(zip(unique_labels, counts)):
-        
-            if label == -1:
-                print(f'Noise (Outliers): {count} subjects')
-                results['n_noise'] = int(count[1])
-                results[f'cluster_{int(label)}_size'] = int(count[1])
-            else:
-                print(f'Cluster {label}: {count} subjects')
-                results[f'cluster_{int(label)}_size'] = int(count[1])
+        for label, count in zip(unique_labels, counts):
+            print(f'Cluster {int(label)}: {int(count)} subjects')
+            results[f'cluster_{int(label)}_size'] = int(count)
         return results
 
-    
     def save_logs(self, dataset_name, task, model_name, best_iteration,
                   clustering_method, metrics):
-        
         logs_savedir = f'results/clustering/{dataset_name}/logs'
-        if not os.path.exists(logs_savedir):
-            os.makedirs(logs_savedir)
-        
+        os.makedirs(logs_savedir, exist_ok=True)
+
         log_entry = {
             'dataset_name': dataset_name,
             'task': task,
@@ -282,60 +271,57 @@ class Logs:
             'clustering_method': clustering_method,
             **metrics
         }
-
-        log_path = os.path.join(logs_savedir, 
-                                f'{dataset_name}_{task}_{model_name}_iteration_{best_iteration}_{clustering_method}_clustering_logs.json')
+        log_path = os.path.join(
+            logs_savedir,
+            f'{dataset_name}_{task}_{model_name}_iteration_{best_iteration}'
+            f'_{clustering_method}_clustering_logs.json'
+        )
         with open(log_path, 'w') as f:
             json.dump(log_entry, f, indent=4)
         print(f"Saved clustering logs to {log_path}")
 
 
 class Pipeline:
-    def __init__(self, dataset_name, task, model_name, best_iteration, 
-                 clustering_method, bands):
+    def __init__(self, dataset_name, task, model_name, best_iteration, bands):
         self.dataset_name = dataset_name
         self.task = task
         self.model_name = model_name
         self.best_iteration = best_iteration
-        self.clustering_method = clustering_method
         self.bands = bands
 
         self.psd_converter = PSDConverter()
         self.feature_preprocessor = FeaturePreprocessor()
-        self.visualizer = Visualizer(dataset_name, task, model_name, best_iteration, clustering_method)
+        self.visualizer = Visualizer(dataset_name, task, model_name, best_iteration)
         self.logs = Logs()
-        self.clustering_strategy = self._get_clustering_strategy()
+        self.clustering_strategy = HierarchicalClustering()
 
-    def _get_clustering_strategy(self):
-        strategies = {
-            'hdbscan': HDBSCAN(),
-            'agglomerative': Agglomerative(),
-            'gaussian': GMM()
-        }
-
-        if self.clustering_method not in strategies:
-            raise ValueError(f"Unsupported clustering method: {self.clustering_method}")
-        
-        return strategies[self.clustering_method]
-    
     def run(self, saliency_maps_list, subject_ids_list):
-
-        print(f"Clustering for dataset: {self.dataset_name}, task: {self.task}, "
+        print(f"Hierarchical clustering for: {self.dataset_name}, {self.task}, "
               f"model: {self.model_name}, iteration: {self.best_iteration}")
-        
+
         psd_features = self.psd_converter.convert(saliency_maps_list, self.bands)
-        print(f"Saliency maps converted to PSD with shape: {psd_features.shape}")
-        processed_features, reduced_features = self.feature_preprocessor.preprocess(psd_features)
+        print(f"PSD features shape: {psd_features.shape}")
+
+        processed_features = self.feature_preprocessor.preprocess(psd_features)
         print(f"Processed features shape: {processed_features.shape}")
 
-        cluster_labels = self.clustering_strategy.cluster(processed_features, self.dataset_name)
+        cluster_labels = self.clustering_strategy.cluster(processed_features)
+
+        self.visualizer.save_dendrogram(
+            self.clustering_strategy.linkage_matrix,
+            subject_ids_list,
+            self.clustering_strategy.n_clusters,
+            self.clustering_strategy.cut_threshold,
+            cluster_labels
+        )
+
         metrics = self.clustering_strategy.get_metrics(processed_features, cluster_labels)
         cluster_counts = self.logs.analyze_clusters(cluster_labels)
         metrics.update(cluster_counts)
 
         self.logs.save_logs(self.dataset_name, self.task, self.model_name,
-                            self.best_iteration, self.clustering_method, metrics)
-        
-        self.visualizer.visualize_clusters(reduced_features, cluster_labels, subject_ids_list)
+                            self.best_iteration, 'hierarchical', metrics)
+
+        self.visualizer.visualize_clusters(processed_features, cluster_labels, subject_ids_list)
 
         return cluster_labels
