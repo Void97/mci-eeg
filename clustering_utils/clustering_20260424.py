@@ -297,15 +297,18 @@ class Pipeline:
         self.logs = Logs()
         self.clustering_strategy = HierarchicalClustering()
 
-    def run(self, saliency_maps_list, subject_ids_list):
+    def run(self, saliency_maps_list, subject_ids_list, precomputed_features=None):
         print(f"Hierarchical clustering for: {self.dataset_name}, {self.task}, "
               f"model: {self.model_name}, iteration: {self.best_iteration}")
 
-        psd_features = self.psd_converter.convert(saliency_maps_list, self.bands)
-        print(f"PSD features shape: {psd_features.shape}")
-
-        processed_features = self.feature_preprocessor.preprocess(psd_features)
-        print(f"Processed features shape: {processed_features.shape}")
+        if precomputed_features is not None:
+            processed_features = precomputed_features
+            print(f"Using precomputed features shape: {processed_features.shape}")
+        else:
+            psd_features = self.psd_converter.convert(saliency_maps_list, self.bands)
+            print(f"PSD features shape: {psd_features.shape}")
+            processed_features = self.feature_preprocessor.preprocess(psd_features)
+            print(f"Processed features shape: {processed_features.shape}")
 
         cluster_labels = self.clustering_strategy.cluster(processed_features)
 

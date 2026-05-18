@@ -20,7 +20,7 @@ def main():
     parser.add_argument('--dataset', type=str, help='Name of the dataset to use')
     parser.add_argument('--gradient', type=str, default='vanilla', choices=GRADIENT_METHODS,
                         help=f'Gradient attribution method for saliency maps. '
-                             f'Available: {", ".join(GRADIENT_METHODS)}')
+                             f'Availbable {", ".join(GRADIENT_METHODS)}')
 
     args = parser.parse_args()
 
