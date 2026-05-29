@@ -13,6 +13,7 @@ from clustering_utils.best_iteration import find_best_iteration
 from clustering_utils.inference_saliency import inference, GRADIENT_METHODS
 from clustering_utils.clustering_20260424 import Pipeline
 from clustering_utils.cluster_interpretation import plot_cluster_psd_topomaps, plot_cluster_subject_psd_curves
+from clustering_utils.faithfulness import FaithfulnessEvaluator, compute_spearman_consistency
 
 def main():
 
@@ -67,13 +68,25 @@ def main():
         print(f"Best params for dataset: {dataset_name}, task: {task}, model: {model['name']} - {best_params}")
         print('---------------------------------------------')
 
-        gradients_list, negative_gradients_list, subject_ids_list, negative_subject_ids_list = inference(dataset_name, task, model,
+        gradients_list, negative_gradients_list, subject_ids_list, negative_subject_ids_list, subject_fold_map = inference(dataset_name, task, model,
                                                                                                         samples, targets, groups,
                                                                                                         best_iteration, best_params, random_seeds,
                                                                                                         gradient_method=gradient_method)
 
         clustering_pipeline = Pipeline(dataset_name, task, model['name'], best_iteration, bands, gradient_method=gradient_method)
         cluster_labels = clustering_pipeline.run(gradients_list, subject_ids_list)
+
+        faithfulness_evaluator = FaithfulnessEvaluator(bands, ch_names, sfreq=200)
+        faithfulness_evaluator.evaluate(
+            model, samples, targets, groups,
+            gradients_list, cluster_labels, subject_ids_list,
+            dataset_name, task, best_iteration, gradient_method,
+            subject_fold_map=subject_fold_map
+        )
+        compute_spearman_consistency(
+            results_path, dataset_name, task, model['name'],
+            best_iteration, GRADIENT_METHODS
+        )
 
         clustering_label = f'hierarchical_{gradient_method}'
         plot_cluster_psd_topomaps(dataset_name, task, model['name'], best_iteration,

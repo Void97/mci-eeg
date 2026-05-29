@@ -54,6 +54,7 @@ def inference(dataset_name, task, model, samples, targets, groups, best_iteratio
 
     gradients_list = []
     negative_gradients_list = [] # to store gradients of correctly predicted negative subjects
+    subject_fold_map = {}  # subject_id -> fold index (used for per-fold faithfulness evaluation)
     # (HC for every task with the HC group, Dementia for MCI vs Dementia, and FTD for AD vs FTD)
     subject_ids_list = []
     negative_subject_ids_list = [] # to store subject ids of correctly predicted negative subjects
@@ -158,6 +159,7 @@ def inference(dataset_name, task, model, samples, targets, groups, best_iteratio
                 av_gradients_of_correct_subjects.append(fold_gradients[mask].mean(axis=0))
                 # av_gradients_of_correct_subjects.append(scaled_fold_gradients[mask].mean(axis=0))
                 correct_subjects.append(id_)
+                subject_fold_map[int(id_)] = fold
             elif pred_label == negative_class and true_label == negative_class:
                 av_gradients_of_correct_negative_subjects.append(fold_gradients[mask].mean(axis=0))
                 correct_negative.append(id_)
@@ -196,7 +198,7 @@ def inference(dataset_name, task, model, samples, targets, groups, best_iteratio
         gradients_list
     )
 
-    return gradients_list, negative_gradients_list, subject_ids_list, negative_subject_ids_list
+    return gradients_list, negative_gradients_list, subject_ids_list, negative_subject_ids_list, subject_fold_map
         
 
 

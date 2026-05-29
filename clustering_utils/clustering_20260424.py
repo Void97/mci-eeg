@@ -183,14 +183,17 @@ class ClusteringStrategy(ABC):
 
 class HierarchicalClustering(ClusteringStrategy):
     """
-    Ward hierarchical clustering via scipy.cluster.hierarchy.
-    Cluster count is determined automatically from the largest gap
-    between consecutive merge distances in the dendrogram.
+    Hierarchical clustering (complete linkage, cosine distance).
+    Cluster count is determined automatically from the 2nd derivative of
+    dendrogram merge distances, then refined so that no cluster contains
+    fewer than min_cluster_size subjects (clusters are merged back up the
+    dendrogram until the constraint is satisfied).
     """
 
-    def __init__(self, method='complete', metric='cosine'):
+    def __init__(self, method='complete', metric='cosine', min_cluster_size=5):
         self.method = method
         self.metric = metric
+        self.min_cluster_size = min_cluster_size
         self.linkage_matrix = None
         self.n_clusters = None
         self.cut_threshold = None
@@ -201,37 +204,44 @@ class HierarchicalClustering(ClusteringStrategy):
             return 2
 
         distances = linkage_matrix[:, 2]
-        # Second derivative of merge distances: finds where growth accelerates most,
-        # rather than just the single largest gap (which almost always gives 2 clusters)
+        # Second derivative of merge distances: finds where growth accelerates most
         acceleration = np.diff(distances, 2)
         # Argmax from the right: large distances = few clusters
         rev_idx = int(np.argmax(acceleration[::-1]))
         k = rev_idx + 2
         return max(2, min(k, 10))
 
+    def _cut_at_k(self, distances, k):
+        n = len(distances) + 1
+        cut_lower = n - k - 1
+        cut_upper = n - k
+        if 0 <= cut_lower and cut_upper < len(distances):
+            return (distances[cut_lower] + distances[cut_upper]) / 2
+        return distances[-k + 1]
+
     def cluster(self, features, dataset_name=None):
         self.linkage_matrix = linkage(features, method=self.method, metric=self.metric)
-        self.n_clusters = self._find_n_clusters(self.linkage_matrix)
-
-        # Cut threshold: midpoint between the two merges that bound the chosen cut
+        k = self._find_n_clusters(self.linkage_matrix)
         distances = self.linkage_matrix[:, 2]
         n = len(distances) + 1
-        cut_lower = n - self.n_clusters - 1
-        cut_upper = n - self.n_clusters
-        if 0 <= cut_lower and cut_upper < len(distances):
-            self.cut_threshold = (distances[cut_lower] + distances[cut_upper]) / 2
-        else:
-            self.cut_threshold = distances[-self.n_clusters + 1]
 
+        # Decrease k until all clusters meet the minimum size constraint
+        while k > 2:
+            threshold = self._cut_at_k(distances, k)
+            labels = fcluster(self.linkage_matrix, t=threshold, criterion='distance') - 1
+            sizes = np.bincount(labels)
+            if sizes.min() >= self.min_cluster_size:
+                break
+            print(f"  k={k}: smallest cluster has {sizes.min()} subjects "
+                  f"(min={self.min_cluster_size}) — merging back to k={k - 1}")
+            k -= 1
+
+        self.cut_threshold = self._cut_at_k(distances, k)
         cluster_labels = fcluster(
             self.linkage_matrix, t=self.cut_threshold, criterion='distance'
         ) - 1  # 0-indexed
 
-        actual_k = len(np.unique(cluster_labels))
-        if actual_k != self.n_clusters:
-            print(f"Note: expected {self.n_clusters} clusters, got {actual_k}.")
-            self.n_clusters = actual_k
-
+        self.n_clusters = len(np.unique(cluster_labels))
         print(f"Hierarchical clustering: {self.n_clusters} clusters "
               f"(cut threshold: {self.cut_threshold:.4f})")
         return cluster_labels
