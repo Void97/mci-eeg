@@ -5,10 +5,9 @@ import json
 from sklearn.preprocessing import normalize
 from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
 from sklearn.manifold import TSNE
-from matplotlib import legend, pyplot as plt
+from matplotlib import pyplot as plt
 from scipy.signal import welch
 from scipy.cluster.hierarchy import linkage, fcluster, dendrogram as scipy_dendrogram
-from abc import ABC, abstractmethod
 
 
 class PSDConverter:
@@ -27,19 +26,15 @@ class PSDConverter:
         return np.array(band_psd_sub).T
 
     def convert(self, saliency_maps, bands):
-        welch_saliency_maps = []
-        for saliency_map in saliency_maps:
-            freqs, psd = welch(
-                saliency_map,
-                fs=self.sfreq,
-                axis=1,
-                nperseg=self.sfreq,
-                noverlap=self.sfreq // 2
-            )
-            psd = psd / (psd.sum() + 1e-8)
-            band_psd_sub = self.extract_band_psd(freqs, psd, bands)
-            welch_saliency_maps.append(band_psd_sub)
-        return np.array(welch_saliency_maps)
+        # saliency_maps: (N, n_ch, n_time) — process all subjects in one welch call
+        freqs, psd = welch(
+            saliency_maps, fs=self.sfreq,
+            axis=-1, nperseg=self.sfreq, noverlap=self.sfreq // 2,
+        )  # psd: (N, n_ch, n_freqs)
+        psd = psd / (psd.sum(axis=-1, keepdims=True) + 1e-8)
+        # extract_band_psd expects (n_ch, n_freqs) → apply per subject
+        return np.stack([self.extract_band_psd(freqs, psd[i], bands)
+                         for i in range(len(psd))])
 
 
 class FeaturePreprocessor:
@@ -171,17 +166,7 @@ class Visualizer:
         plt.close()
 
 
-class ClusteringStrategy(ABC):
-    @abstractmethod
-    def cluster(self, features, dataset_name=None):
-        pass
-
-    @abstractmethod
-    def get_metrics(self, features, labels):
-        pass
-
-
-class HierarchicalClustering(ClusteringStrategy):
+class HierarchicalClustering:
     """
     Hierarchical clustering (complete linkage, cosine distance).
     Cluster count is determined automatically from the 2nd derivative of
@@ -257,39 +242,35 @@ class HierarchicalClustering(ClusteringStrategy):
         return {}
 
 
-class Logs:
-    def __init__(self):
-        self.logs = {}
+def _analyze_clusters(cluster_labels):
+    unique_labels, counts = np.unique(cluster_labels, return_counts=True)
+    results = {}
+    for label, count in zip(unique_labels, counts):
+        print(f'Cluster {int(label)}: {int(count)} subjects')
+        results[f'cluster_{int(label)}_size'] = int(count)
+    return results
 
-    def analyze_clusters(self, cluster_labels):
-        unique_labels, counts = np.unique(cluster_labels, return_counts=True)
-        results = {}
-        for label, count in zip(unique_labels, counts):
-            print(f'Cluster {int(label)}: {int(count)} subjects')
-            results[f'cluster_{int(label)}_size'] = int(count)
-        return results
 
-    def save_logs(self, dataset_name, task, model_name, best_iteration,
-                  clustering_method, metrics):
-        logs_savedir = f'results/clustering/{dataset_name}/logs'
-        os.makedirs(logs_savedir, exist_ok=True)
-
-        log_entry = {
-            'dataset_name': dataset_name,
-            'task': task,
-            'model_name': model_name,
-            'best_iteration': int(best_iteration),
-            'clustering_method': clustering_method,
-            **metrics
-        }
-        log_path = os.path.join(
-            logs_savedir,
-            f'{dataset_name}_{task}_{model_name}_iteration_{best_iteration}'
-            f'_{clustering_method}_clustering_logs.json'
-        )
-        with open(log_path, 'w') as f:
-            json.dump(log_entry, f, indent=4)
-        print(f"Saved clustering logs to {log_path}")
+def _save_logs(dataset_name, task, model_name, best_iteration,
+               clustering_method, metrics):
+    logs_savedir = f'results/clustering/{dataset_name}/logs'
+    os.makedirs(logs_savedir, exist_ok=True)
+    log_entry = {
+        'dataset_name': dataset_name,
+        'task': task,
+        'model_name': model_name,
+        'best_iteration': int(best_iteration),
+        'clustering_method': clustering_method,
+        **metrics,
+    }
+    log_path = os.path.join(
+        logs_savedir,
+        f'{dataset_name}_{task}_{model_name}_iteration_{best_iteration}'
+        f'_{clustering_method}_clustering_logs.json',
+    )
+    with open(log_path, 'w') as f:
+        json.dump(log_entry, f, indent=4)
+    print(f"Saved clustering logs to {log_path}")
 
 
 class Pipeline:
@@ -304,7 +285,6 @@ class Pipeline:
         self.psd_converter = PSDConverter()
         self.feature_preprocessor = FeaturePreprocessor()
         self.visualizer = Visualizer(dataset_name, task, model_name, best_iteration, gradient_method)
-        self.logs = Logs()
         self.clustering_strategy = HierarchicalClustering()
 
     def run(self, saliency_maps_list, subject_ids_list, precomputed_features=None):
@@ -331,11 +311,9 @@ class Pipeline:
         )
 
         metrics = self.clustering_strategy.get_metrics(processed_features, cluster_labels)
-        cluster_counts = self.logs.analyze_clusters(cluster_labels)
-        metrics.update(cluster_counts)
-
-        self.logs.save_logs(self.dataset_name, self.task, self.model_name,
-                            self.best_iteration, f'hierarchical_{self.gradient_method}', metrics)
+        metrics.update(_analyze_clusters(cluster_labels))
+        _save_logs(self.dataset_name, self.task, self.model_name,
+                   self.best_iteration, f'hierarchical_{self.gradient_method}', metrics)
 
         self.visualizer.visualize_clusters(processed_features, cluster_labels, subject_ids_list)
 

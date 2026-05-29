@@ -1,4 +1,5 @@
 import os
+import json
 import mne
 import numpy as np
 import matplotlib.pyplot as plt
@@ -732,4 +733,87 @@ def plot_subject_psd_topomaps(
 #                 plt.savefig(savepath, bbox_inches='tight')
 #                 plt.close(fig)
 #                 print(f"Saved topomap for cluster {cluster_label}, subject {i}, {band} band at {savepath}")
+
+
+def plot_masking_curves(dataset_name, task, model_name, best_iteration,
+                        gradient_methods, exp_key,
+                        output_dir='results/clustering'):
+    """
+    For each cluster, plot MoRF (left) and LeRF (right) accuracy curves for all
+    available gradient methods overlaid.  Horizontal lines mark baseline_cluster
+    and baseline_fold.  One PNG per cluster.
+
+    Reads faithfulness JSONs from:
+        {output_dir}/{dataset_name}/faithfulness/{prefix}_{gm}_{exp_key}_faithfulness.json
+    Saves PNGs to:
+        {output_dir}/{dataset_name}/masking_curves/{prefix}_{exp_key}_cluster{c}.png
+    """
+    faith_dir = os.path.join(output_dir, dataset_name, 'faithfulness')
+    save_dir  = os.path.join(output_dir, dataset_name, 'masking_curves')
+    os.makedirs(save_dir, exist_ok=True)
+
+    prefix = f'{dataset_name}_{task}_{model_name}_iteration_{best_iteration}'
+
+    method_data = {}
+    for gm in gradient_methods:
+        path = os.path.join(faith_dir, f'{prefix}_{gm}_{exp_key}_faithfulness.json')
+        if os.path.exists(path):
+            with open(path) as f:
+                method_data[gm] = json.load(f)
+
+    if not method_data:
+        print(f"No faithfulness data found for {dataset_name} | {task} | {exp_key} — skipping.")
+        return
+
+    first      = next(iter(method_data.values()))
+    cluster_ids = sorted([k for k in first if k != 'overall'], key=int)
+    colors     = plt.cm.tab10(np.linspace(0, 1, len(gradient_methods)))
+    color_map  = {gm: colors[i] for i, gm in enumerate(gradient_methods)}
+
+    for c in cluster_ids:
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+        fig.suptitle(
+            f'{dataset_name}  |  {task}  |  {exp_key}  |  Cluster {c}',
+            fontsize=11
+        )
+
+        for ax, curve_key, title in [
+            (axes[0], 'morf_curve', 'MoRF  (most relevant first)'),
+            (axes[1], 'lerf_curve', 'LeRF  (least relevant first)'),
+        ]:
+            for gm, data in method_data.items():
+                if str(c) not in data and c not in data:
+                    continue
+                entry  = data.get(str(c), data.get(c, {}))
+                curve  = entry.get(curve_key, [])
+                if not curve:
+                    continue
+                ks = list(range(1, len(curve) + 1))
+                ax.plot(ks, curve, label=gm, color=color_map[gm], linewidth=1.5)
+
+            # Baseline lines (from first available method — same model, same fold)
+            first_entry = first.get(str(c), first.get(c, {}))
+            bc = first_entry.get('baseline_cluster')
+            bf = first_entry.get('baseline_fold')
+            if bc is not None:
+                ax.axhline(bc, color='black',  linestyle='--', linewidth=1.0,
+                           label=f'baseline cluster ({bc:.2f})')
+            if bf is not None:
+                ax.axhline(bf, color='dimgray', linestyle=':',  linewidth=1.0,
+                           label=f'baseline fold ({bf:.2f})')
+            ax.axhline(0.5, color='red', linestyle=':', linewidth=0.8, alpha=0.5,
+                       label='chance (0.5)')
+
+            ax.set_xlabel('Masking step k', fontsize=10)
+            ax.set_ylabel('Accuracy',        fontsize=10)
+            ax.set_title(title,              fontsize=10)
+            ax.set_ylim(0, 1.05)
+            ax.legend(fontsize=7, loc='upper right')
+
+        plt.tight_layout()
+        savename  = f'{prefix}_{exp_key}_cluster{c}_masking_curves.png'
+        savepath  = os.path.join(save_dir, savename)
+        plt.savefig(savepath, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved masking curves [{exp_key}] cluster {c} → {savepath}")
                     

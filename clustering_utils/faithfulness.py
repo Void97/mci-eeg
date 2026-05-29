@@ -7,10 +7,9 @@ from collections import defaultdict
 from numpy.fft import rfft, irfft, rfftfreq
 from scipy.stats import spearmanr
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import StratifiedGroupKFold
 
 from clustering_utils.clustering_20260424 import PSDConverter
+from clustering_utils.constants import encode_groups, get_fold_splits
 
 EXP_KEYS = ['spatial_ar', 'spatial_road', 'frequency_ar', 'frequency_road']
 
@@ -21,7 +20,11 @@ EXP_KEYS = ['spatial_ar', 'spatial_road', 'frequency_ar', 'frequency_road']
 
 def _weighted_avg(values, weights):
     total = sum(weights)
-    return sum(v * (w / total) for v, w in zip(values, weights))
+    result = None
+    for v, w in zip(values, weights):
+        term = v * (w / total)
+        result = term if result is None else result + term
+    return result
 
 
 # ─────────────────────────────────────────────────────────────
@@ -211,10 +214,11 @@ def _spearman_per_step(morf, lerf):
     morf / lerf: (n_methods, n_steps)
     Returns per-step Spearman rho between method rankings.
     """
-    return [
-        float(rho) if not np.isnan(rho := spearmanr(morf[:, k], lerf[:, k]).statistic) else 0.0
-        for k in range(morf.shape[1])
-    ]
+    rhos = []
+    for k in range(morf.shape[1]):
+        rho = spearmanr(morf[:, k], lerf[:, k])[0]
+        rhos.append(0.0 if np.isnan(rho) else float(rho))
+    return rhos
 
 
 def compute_spearman_consistency(results_path, dataset_name, task, model_name,
@@ -288,6 +292,7 @@ class FaithfulnessEvaluator:
         self.band_names = list(bands.keys())
         self.n_channels = len(ch_names)
         self.n_bands = len(bands)
+        self.psd_converter = PSDConverter(sfreq=sfreq)
 
     def _rank_features(self, centroid, axis):
         """centroid: (n_ch, n_bands) → feature indices sorted most-salient first."""
@@ -321,11 +326,7 @@ class FaithfulnessEvaluator:
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        if dataset_name == 'ADvsFTDvsHC':
-            enc = LabelEncoder()
-            groups = enc.fit_transform(groups).astype(np.int64) + 1
-        else:
-            groups = groups.astype(np.int64)
+        groups = encode_groups(dataset_name, groups)
         subject_ids_list = np.array(subject_ids_list, dtype=np.int64)
         cluster_labels = np.array(cluster_labels)
 
@@ -346,17 +347,10 @@ class FaithfulnessEvaluator:
             fold_nets[fold] = net_f
             print(f"Loaded fold {fold} weights from {wp}")
 
-        # Fold test sets for fold-level baseline
-        fold_test_indices = {
-            fold: test_idx
-            for fold, (_, test_idx) in enumerate(
-                StratifiedGroupKFold(n_splits=5, shuffle=False)
-                .split(samples, targets, groups=groups)
-            )
-        }
+        fold_test_indices = get_fold_splits(samples, targets, groups)
 
         # Cluster centroids
-        psd_features = PSDConverter(sfreq=self.sfreq).convert(gradients_list, self.bands)
+        psd_features = self.psd_converter.convert(gradients_list, self.bands)
         unique_clusters = np.unique(cluster_labels)
         subj_to_cluster = dict(zip(subject_ids_list, cluster_labels))
         centroids = {c: psd_features[cluster_labels == c].mean(axis=0) for c in unique_clusters}
@@ -404,8 +398,8 @@ class FaithfulnessEvaluator:
                 flat_z = flat - flat.mean(axis=1, keepdims=True)
                 norms = np.linalg.norm(flat_z, axis=1, keepdims=True).clip(min=1e-8)
                 corr_m = (flat_z / norms) @ (flat_z / norms).T
-                f_sp   = rfft(X_f,   axis=-1)
-                adv_sp = rfft(adv_f, axis=-1)
+                f_sp   = rfft(X_f,                      axis=-1)
+                adv_sp = rfft(np.asarray(adv_f), axis=-1)
 
                 bnames = lambda idxs: [self.band_names[i] for i in idxs]
 
