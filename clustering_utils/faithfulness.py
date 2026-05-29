@@ -5,11 +5,23 @@ import torch
 import torch.nn.functional as F
 from collections import defaultdict
 from numpy.fft import rfft, irfft, rfftfreq
+from scipy.stats import spearmanr
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import StratifiedGroupKFold
 
 from clustering_utils.clustering_20260424 import PSDConverter
+
+EXP_KEYS = ['spatial_ar', 'spatial_road', 'frequency_ar', 'frequency_road']
+
+
+# ─────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────
+
+def _weighted_avg(values, weights):
+    total = sum(weights)
+    return sum(v * (w / total) for v, w in zip(values, weights))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -18,9 +30,8 @@ from clustering_utils.clustering_20260424 import PSDConverter
 
 def _pgd_attack(net, x, y, epsilon, alpha=2.0, n_iter=10):
     """
-    Untargeted PGD attack with L2 ball constraint.
-    x: (n, 1, n_channels, n_time) — model input format
-    y: (n,) long tensor
+    Untargeted PGD with L2 ball constraint.
+    x: (n, 1, n_ch, n_time) — model input format.
     Returns adversarial examples as CPU tensor, same shape as x.
     """
     device = x.device
@@ -32,8 +43,7 @@ def _pgd_attack(net, x, y, epsilon, alpha=2.0, n_iter=10):
         out = net(x_adv)
         if isinstance(out, tuple):
             out = out[0]
-        loss = F.cross_entropy(out, y)
-        loss.backward()
+        F.cross_entropy(out, y).backward()
 
         with torch.no_grad():
             x_adv = x_adv + alpha * x_adv.grad.sign()
@@ -49,86 +59,70 @@ def _pgd_attack(net, x, y, epsilon, alpha=2.0, n_iter=10):
 # ROAD replacement
 # ─────────────────────────────────────────────────────────────
 
-def _road_spatial_replace(samples, channels_to_mask):
+def _road_spatial_replace(samples, channels_to_mask, corr_matrix=None):
     """
-    ROAD spatial imputer: replace each masked channel with a
-    correlation-weighted average of the remaining channels + IQR-scaled noise.
+    Replace each masked channel with a correlation-weighted average of the
+    remaining channels + IQR-scaled noise.  Pass a precomputed corr_matrix
+    (n_ch × n_ch) to avoid recomputing it across masking steps.
     samples: (n_trials, n_channels, n_time)
     """
-    result = samples.copy()
-    n_trials, n_ch, n_time = samples.shape
     channels_to_mask = list(channels_to_mask)
+    n_trials, n_ch, n_time = samples.shape
     keep_idx = [c for c in range(n_ch) if c not in channels_to_mask]
-
     if not keep_idx:
-        return result
+        return samples.copy()
 
-    # Batch-level correlation matrix (faster than per-trial)
-    flat = samples.reshape(n_ch, -1)
-    flat_z = flat - flat.mean(axis=1, keepdims=True)
-    norms = np.linalg.norm(flat_z, axis=1, keepdims=True).clip(min=1e-8)
-    corr_matrix = (flat_z / norms) @ (flat_z / norms).T  # (n_ch, n_ch)
+    if corr_matrix is None:
+        flat = samples.transpose(1, 0, 2).reshape(n_ch, -1)  # (n_ch, n_trials*n_time)
+        flat_z = flat - flat.mean(axis=1, keepdims=True)
+        norms = np.linalg.norm(flat_z, axis=1, keepdims=True).clip(min=1e-8)
+        corr_matrix = (flat_z / norms) @ (flat_z / norms).T
 
+    result = samples.copy()
     for c in channels_to_mask:
         w = np.abs(corr_matrix[c, keep_idx])
-        w = w / (w.sum() + 1e-8)
-        # Vectorised over trials: (n_trials, n_time)
-        imputed = (samples[:, keep_idx, :] * w[None, :, None]).sum(axis=1)
-        noise_std = samples[:, c, :].std() * 0.01
-        result[:, c, :] = imputed + np.random.randn(n_trials, n_time) * noise_std
-
+        w /= w.sum() + 1e-8
+        result[:, c, :] = (
+            (samples[:, keep_idx, :] * w[None, :, None]).sum(axis=1)
+            + np.random.randn(n_trials, n_time) * samples[:, c, :].std() * 0.01
+        )
     return result
 
 
-def _road_frequency_replace(samples, bands_to_mask, bands, sfreq):
+def _road_frequency_replace(samples, bands_to_mask, bands, sfreq, specs=None):
     """
-    ROAD frequency imputer: replace masked frequency bands with amplitude
-    interpolated from adjacent kept bands (log-frequency) + small noise.
+    Replace masked frequency bands with amplitude interpolated from adjacent
+    kept bands (log-frequency) + small noise.  Pass precomputed specs
+    (rfft of samples) to avoid recomputing the FFT across masking steps.
     samples: (n_trials, n_channels, n_time)
     """
     n_time = samples.shape[2]
     freqs = rfftfreq(n_time, d=1.0 / sfreq)
-    all_band_names = list(bands.keys())
-    keep_bands = [b for b in all_band_names if b not in bands_to_mask]
-
-    band_freq_masks = {
-        name: (freqs >= fmin) & (freqs < fmax)
-        for name, (fmin, fmax) in bands.items()
-    }
-    band_centers = {name: (fmin + fmax) / 2.0 for name, (fmin, fmax) in bands.items()}
-
-    # Vectorised FFT: (n_trials, n_channels, n_freqs)
-    specs = rfft(samples, axis=-1).copy()
+    keep_bands = [b for b in bands if b not in bands_to_mask]
+    band_masks = {n: (freqs >= f0) & (freqs < f1) for n, (f0, f1) in bands.items()}
+    band_centers = {n: (f0 + f1) / 2.0 for n, (f0, f1) in bands.items()}
+    out_specs = (rfft(samples, axis=-1).copy() if specs is None else specs.copy())
 
     for band_name in bands_to_mask:
-        fmask = band_freq_masks[band_name]
+        fmask = band_masks[band_name]
         fc = band_centers[band_name]
 
         if len(keep_bands) >= 2:
-            kept_centers = np.array([band_centers[b] for b in keep_bands])
-            kept_amps = np.array([
-                np.abs(specs[:, :, band_freq_masks[b]]).mean()
-                for b in keep_bands
-            ])
-            interp_amp = np.interp(
-                np.log(fc + 1e-8),
-                np.log(kept_centers + 1e-8),
-                kept_amps
-            )
+            kc = np.array([band_centers[b] for b in keep_bands])
+            ka = np.array([np.abs(out_specs[:, :, band_masks[b]]).mean() for b in keep_bands])
+            interp_amp = np.interp(np.log(fc + 1e-8), np.log(kc + 1e-8), ka)
         elif len(keep_bands) == 1:
-            interp_amp = np.abs(specs[:, :, band_freq_masks[keep_bands[0]]]).mean()
+            interp_amp = np.abs(out_specs[:, :, band_masks[keep_bands[0]]]).mean()
         else:
-            interp_amp = np.abs(specs).mean()
+            interp_amp = np.abs(out_specs).mean()
 
-        local_amp = np.abs(specs[:, :, fmask])
-        noise_std = local_amp.std() * 0.1
-        orig_phase = np.angle(specs[:, :, fmask])
+        local_amp = np.abs(out_specs[:, :, fmask])
         new_amp = np.maximum(
-            interp_amp + np.random.randn(*local_amp.shape) * noise_std, 0
+            interp_amp + np.random.randn(*local_amp.shape) * local_amp.std() * 0.1, 0
         )
-        specs[:, :, fmask] = new_amp * np.exp(1j * orig_phase)
+        out_specs[:, :, fmask] = new_amp * np.exp(1j * np.angle(out_specs[:, :, fmask]))
 
-    return irfft(specs, n=n_time, axis=-1).astype(np.float32)
+    return irfft(out_specs, n=n_time, axis=-1).astype(np.float32)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -142,22 +136,25 @@ def _apply_spatial_ar(samples, adv_samples, channels):
     return result
 
 
-def _apply_frequency_ar(samples, adv_samples, band_names, bands, sfreq):
-    """Replace frequency bands with adversarial counterparts."""
+def _apply_frequency_ar(samples, adv_samples, band_names, bands, sfreq,
+                        adv_specs=None):
+    """
+    Replace frequency bands with adversarial counterparts.
+    Pass precomputed adv_specs (rfft of adv_samples) to avoid recomputing
+    the FFT across masking steps.
+    """
     n_time = samples.shape[2]
     freqs = rfftfreq(n_time, d=1.0 / sfreq)
-    result = samples.copy()
+    specs = rfft(samples, axis=-1).copy()
+    if adv_specs is None:
+        adv_specs = rfft(adv_samples, axis=-1)
 
-    for ch in range(samples.shape[1]):
-        spec = rfft(result[:, ch, :], axis=-1)
-        adv_spec = rfft(adv_samples[:, ch, :], axis=-1)
-        for band_name in band_names:
-            fmin, fmax = bands[band_name]
-            fmask = (freqs >= fmin) & (freqs < fmax)
-            spec[:, fmask] = adv_spec[:, fmask]
-        result[:, ch, :] = irfft(spec, n=n_time, axis=-1)
+    for band_name in band_names:
+        fmin, fmax = bands[band_name]
+        fmask = (freqs >= fmin) & (freqs < fmax)
+        specs[:, :, fmask] = adv_specs[:, :, fmask]
 
-    return result
+    return irfft(specs, n=n_time, axis=-1).astype(np.float32)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -209,56 +206,42 @@ def _trial_accuracy(net, samples_np, targets_np, device, batch_size=64):
 # Spearman consistency
 # ─────────────────────────────────────────────────────────────
 
-def _spearman_diff(morf, lerf):
+def _spearman_per_step(morf, lerf):
     """
-    At each masking step k, rank gradient methods by MoRF (ascending) and
-    LeRF (descending), compute Spearman rho between the two rankings.
     morf / lerf: (n_methods, n_steps)
+    Returns per-step Spearman rho between method rankings.
     """
-    from scipy.stats import spearmanr
-    n_steps = morf.shape[1]
-    rhos = []
-    for k in range(n_steps):
-        morf_k = morf[:, k]
-        lerf_k = lerf[:, k]
-        rho, _ = spearmanr(morf_k, lerf_k)
-        rhos.append(float(rho) if not np.isnan(rho) else 0.0)
-    return rhos
+    return [
+        float(rho) if not np.isnan(rho := spearmanr(morf[:, k], lerf[:, k]).statistic) else 0.0
+        for k in range(morf.shape[1])
+    ]
 
 
 def compute_spearman_consistency(results_path, dataset_name, task, model_name,
                                  best_iteration, gradient_methods,
                                  exp_key='spatial_ar'):
     """
-    Load per-method faithfulness JSON files and compute Spearman consistency
+    Load per-method faithfulness JSONs and compute Spearman consistency
     across gradient methods at each masking step.
-    exp_key: which experiment type to use ('spatial_ar', 'spatial_road',
-             'frequency_ar', 'frequency_road')
     """
     faith_dir = os.path.join(results_path, dataset_name, 'faithfulness')
     prefix = f'{dataset_name}_{task}_{model_name}_iteration_{best_iteration}'
 
-    morfs, lerfs = [], []
-    available = []
+    morfs, lerfs, available = [], [], []
     for gm in gradient_methods:
         path = os.path.join(faith_dir, f'{prefix}_{gm}_{exp_key}_faithfulness.json')
         if not os.path.exists(path):
             continue
         with open(path) as f:
             data = json.load(f)
-
         cluster_keys = [k for k in data if k != 'overall']
         if not cluster_keys:
             continue
 
         total_subj = sum(data[k]['n_subjects'] for k in cluster_keys)
-        morf_avg = np.zeros(len(data[cluster_keys[0]]['morf_curve']))
-        lerf_avg = np.zeros_like(morf_avg)
-        for k in cluster_keys:
-            w = data[k]['n_subjects'] / total_subj
-            morf_avg += w * np.array(data[k]['morf_curve'])
-            lerf_avg += w * np.array(data[k]['lerf_curve'])
-
+        weights = [data[k]['n_subjects'] / total_subj for k in cluster_keys]
+        morf_avg = _weighted_avg([np.array(data[k]['morf_curve']) for k in cluster_keys], weights)
+        lerf_avg = _weighted_avg([np.array(data[k]['lerf_curve']) for k in cluster_keys], weights)
         morfs.append(morf_avg)
         lerfs.append(lerf_avg)
         available.append(gm)
@@ -267,25 +250,15 @@ def compute_spearman_consistency(results_path, dataset_name, task, model_name,
         print(f"Spearman [{exp_key}]: fewer than 2 methods available, skipping.")
         return
 
-    morf_mat = np.stack(morfs)
-    lerf_mat = np.stack(lerfs)
-    rhos = _spearman_diff(morf_mat, lerf_mat)
-    mean_rho = float(np.mean(rhos))
-    std_rho = float(np.std(rhos))
-    print(f"Spearman [{exp_key}] ({len(available)} methods): "
-          f"rho = {mean_rho:.3f} ± {std_rho:.3f}")
+    rhos = _spearman_per_step(np.stack(morfs), np.stack(lerfs))
+    mean_rho, std_rho = float(np.mean(rhos)), float(np.std(rhos))
+    print(f"Spearman [{exp_key}] ({len(available)} methods): rho = {mean_rho:.3f} ± {std_rho:.3f}")
 
-    out = {
-        'exp_key': exp_key,
-        'methods': available,
-        'spearman_mean': mean_rho,
-        'spearman_std': std_rho,
-        'spearman_per_k': rhos,
-    }
-    path = os.path.join(faith_dir,
-                        f'{prefix}_{exp_key}_spearman.json')
+    path = os.path.join(faith_dir, f'{prefix}_{exp_key}_spearman.json')
     with open(path, 'w') as f:
-        json.dump(out, f, indent=4)
+        json.dump({'exp_key': exp_key, 'methods': available,
+                   'spearman_mean': mean_rho, 'spearman_std': std_rho,
+                   'spearman_per_k': rhos}, f, indent=4)
     print(f"Saved Spearman results to {path}")
 
 
@@ -293,23 +266,15 @@ def compute_spearman_consistency(results_path, dataset_name, task, model_name,
 # Main evaluator
 # ─────────────────────────────────────────────────────────────
 
-EXP_KEYS = ['spatial_ar', 'spatial_road', 'frequency_ar', 'frequency_road']
-
-
 class FaithfulnessEvaluator:
     """
     Faithfulness evaluation for EEG subgroup clusters.
 
-    Runs four independent masking experiments per cluster:
-      • spatial_ar   — mask channels, replace with PGD adversarial
-      • spatial_road — mask channels, replace with ROAD imputer
-      • frequency_ar   — mask frequency bands, replace with PGD adversarial
-      • frequency_road — mask frequency bands, replace with ROAD imputer
+    Runs four masking experiments per cluster:
+      • spatial_ar / spatial_road   — mask channels (k = 1 … n_channels)
+      • frequency_ar / frequency_road — mask bands   (k = 1 … n_bands)
 
-    Masking steps: k = 1 … n_channels (spatial) or k = 1 … n_bands (frequency),
-    one feature at a time — matching XAI_tools_auto convention.
-
-    Two baselines are computed per cluster per fold:
+    Two baselines per fold:
       • baseline_cluster: subject-level accuracy on cluster subjects (= 1.0 by design)
       • baseline_fold:    trial-level accuracy on the full fold test set
     """
@@ -324,13 +289,9 @@ class FaithfulnessEvaluator:
         self.n_channels = len(ch_names)
         self.n_bands = len(bands)
 
-    def _rank_channels(self, centroid):
-        """centroid: (n_ch, n_bands) → channel indices sorted most-salient first"""
-        return np.argsort(centroid.mean(axis=1))[::-1].tolist()
-
-    def _rank_bands(self, centroid):
-        """centroid: (n_ch, n_bands) → band indices sorted most-salient first"""
-        return np.argsort(centroid.mean(axis=0))[::-1].tolist()
+    def _rank_features(self, centroid, axis):
+        """centroid: (n_ch, n_bands) → feature indices sorted most-salient first."""
+        return np.argsort(centroid.mean(axis=axis))[::-1].tolist()
 
     def _compute_pgd(self, net, X_f, y_f, epsilon, device, batch_size=256):
         chunks = []
@@ -360,7 +321,6 @@ class FaithfulnessEvaluator:
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Encode groups to match inference_saliency encoding
         if dataset_name == 'ADvsFTDvsHC':
             enc = LabelEncoder()
             groups = enc.fit_transform(groups).astype(np.int64) + 1
@@ -374,8 +334,7 @@ class FaithfulnessEvaluator:
                else {int(sid): 0 for sid in subject_ids_list})
 
         # Load one model per fold
-        folds_needed = sorted({sfm[int(sid)] for sid in subject_ids_list
-                                if int(sid) in sfm})
+        folds_needed = sorted({sfm[int(sid)] for sid in subject_ids_list if int(sid) in sfm})
         fold_nets = {}
         for fold in folds_needed:
             net_f = model['class'](**model['kwargs'], tsne=False)
@@ -387,48 +346,40 @@ class FaithfulnessEvaluator:
             fold_nets[fold] = net_f
             print(f"Loaded fold {fold} weights from {wp}")
 
-        # Reconstruct fold test sets for fold-level baseline
-        kf = StratifiedGroupKFold(n_splits=5, shuffle=False)
+        # Fold test sets for fold-level baseline
         fold_test_indices = {
             fold: test_idx
             for fold, (_, test_idx) in enumerate(
-                kf.split(samples, targets, groups=groups)
+                StratifiedGroupKFold(n_splits=5, shuffle=False)
+                .split(samples, targets, groups=groups)
             )
         }
 
         # Cluster centroids
-        psd_converter = PSDConverter(sfreq=self.sfreq)
-        psd_features = psd_converter.convert(gradients_list, self.bands)
+        psd_features = PSDConverter(sfreq=self.sfreq).convert(gradients_list, self.bands)
         unique_clusters = np.unique(cluster_labels)
         subj_to_cluster = dict(zip(subject_ids_list, cluster_labels))
-        centroids = {
-            c: psd_features[cluster_labels == c].mean(axis=0)
-            for c in unique_clusters
-        }
+        centroids = {c: psd_features[cluster_labels == c].mean(axis=0) for c in unique_clusters}
 
         trial_mask = np.isin(groups, subject_ids_list)
-        samples_c = samples[trial_mask]
-        targets_c = targets[trial_mask]
-        groups_c = groups[trial_mask]
-
+        samples_c, targets_c, groups_c = (samples[trial_mask],
+                                          targets[trial_mask],
+                                          groups[trial_mask])
         n_classes = len(np.unique(targets))
         all_results = {k: {} for k in EXP_KEYS}
 
         for c in unique_clusters:
-            cluster_subjects = [sid for sid in subject_ids_list
-                                 if subj_to_cluster[sid] == c]
-            ranked_ch = self._rank_channels(centroids[c])
-            ranked_bd = self._rank_bands(centroids[c])
+            cluster_subjects = [sid for sid in subject_ids_list if subj_to_cluster[sid] == c]
+            ranked_ch = self._rank_features(centroids[c], axis=1)  # channels
+            ranked_bd = self._rank_features(centroids[c], axis=0)  # bands
 
             fold_to_subjects = defaultdict(list)
             for sid in cluster_subjects:
                 fold_to_subjects[sfm.get(int(sid), 0)].append(int(sid))
-
             print(f"Cluster {c}: {len(cluster_subjects)} subjects "
                   f"across {len(fold_to_subjects)} fold(s)")
 
-            fold_data = {k: dict(morf=[], lerf=[], weights=[],
-                                 bc=[], bf=[])
+            fold_data = {k: dict(morf=[], lerf=[], weights=[], bc=[], bf=[])
                          for k in EXP_KEYS}
 
             for fold in sorted(fold_to_subjects):
@@ -436,109 +387,75 @@ class FaithfulnessEvaluator:
                 fold_subs = fold_to_subjects[fold]
 
                 f_mask = np.isin(groups_c, fold_subs)
-                X_f = samples_c[f_mask]
-                y_f = targets_c[f_mask]
-                g_f = groups_c[f_mask]
+                X_f, y_f, g_f = samples_c[f_mask], targets_c[f_mask], groups_c[f_mask]
 
-                # Two baselines
                 bc = _subject_accuracy(net_f, X_f, y_f, g_f, fold_subs, device)
-                bf = _trial_accuracy(
-                    net_f,
-                    samples[fold_test_indices[fold]],
-                    targets[fold_test_indices[fold]],
-                    device
-                )
+                target_class = 0 if task == 'MCI vs Dementia' else 1
+                test_idx = fold_test_indices[fold]
+                pos_mask = targets[test_idx] == target_class
+                bf = _trial_accuracy(net_f, samples[test_idx][pos_mask],
+                                     targets[test_idx][pos_mask], device)
 
-                # PGD adversarial examples (shared by AR variants)
                 epsilon = float(np.abs(X_f).max())
                 adv_f = self._compute_pgd(net_f, X_f, y_f, epsilon, device)
 
-                # ── Spatial AR ───────────────────────────────────
-                s_ar_m, s_ar_l = [], []
-                for k in range(1, self.n_channels + 1):
-                    s_ar_m.append(_subject_accuracy(
-                        net_f, _apply_spatial_ar(X_f, adv_f, ranked_ch[:k]),
-                        y_f, g_f, fold_subs, device))
-                    s_ar_l.append(_subject_accuracy(
-                        net_f, _apply_spatial_ar(X_f, adv_f, ranked_ch[-k:]),
-                        y_f, g_f, fold_subs, device))
+                # Precompute per-fold to avoid redundant FFT / correlation
+                flat = X_f.transpose(1, 0, 2).reshape(self.n_channels, -1)
+                flat_z = flat - flat.mean(axis=1, keepdims=True)
+                norms = np.linalg.norm(flat_z, axis=1, keepdims=True).clip(min=1e-8)
+                corr_m = (flat_z / norms) @ (flat_z / norms).T
+                f_sp   = rfft(X_f,   axis=-1)
+                adv_sp = rfft(adv_f, axis=-1)
 
-                # ── Spatial ROAD ─────────────────────────────────
-                s_rd_m, s_rd_l = [], []
-                for k in range(1, self.n_channels + 1):
-                    s_rd_m.append(_subject_accuracy(
-                        net_f, _road_spatial_replace(X_f, ranked_ch[:k]),
-                        y_f, g_f, fold_subs, device))
-                    s_rd_l.append(_subject_accuracy(
-                        net_f, _road_spatial_replace(X_f, ranked_ch[-k:]),
-                        y_f, g_f, fold_subs, device))
+                bnames = lambda idxs: [self.band_names[i] for i in idxs]
 
-                # ── Frequency AR ──────────────────────────────────
-                f_ar_m, f_ar_l = [], []
-                for k in range(1, self.n_bands + 1):
-                    bm = [self.band_names[i] for i in ranked_bd[:k]]
-                    bl = [self.band_names[i] for i in ranked_bd[-k:]]
-                    f_ar_m.append(_subject_accuracy(
-                        net_f, _apply_frequency_ar(X_f, adv_f, bm, self.bands, self.sfreq),
-                        y_f, g_f, fold_subs, device))
-                    f_ar_l.append(_subject_accuracy(
-                        net_f, _apply_frequency_ar(X_f, adv_f, bl, self.bands, self.sfreq),
-                        y_f, g_f, fold_subs, device))
+                maskers = [
+                    ('spatial_ar',    self.n_channels,
+                     lambda k: _apply_spatial_ar(X_f, adv_f, ranked_ch[:k]),
+                     lambda k: _apply_spatial_ar(X_f, adv_f, ranked_ch[-k:])),
+                    ('spatial_road',  self.n_channels,
+                     lambda k: _road_spatial_replace(X_f, ranked_ch[:k], corr_m),
+                     lambda k: _road_spatial_replace(X_f, ranked_ch[-k:], corr_m)),
+                    ('frequency_ar',  self.n_bands,
+                     lambda k: _apply_frequency_ar(X_f, adv_f, bnames(ranked_bd[:k]),
+                                                   self.bands, self.sfreq, adv_sp),
+                     lambda k: _apply_frequency_ar(X_f, adv_f, bnames(ranked_bd[-k:]),
+                                                   self.bands, self.sfreq, adv_sp)),
+                    ('frequency_road',self.n_bands,
+                     lambda k: _road_frequency_replace(X_f, bnames(ranked_bd[:k]),
+                                                       self.bands, self.sfreq, f_sp),
+                     lambda k: _road_frequency_replace(X_f, bnames(ranked_bd[-k:]),
+                                                       self.bands, self.sfreq, f_sp)),
+                ]
 
-                # ── Frequency ROAD ────────────────────────────────
-                f_rd_m, f_rd_l = [], []
-                for k in range(1, self.n_bands + 1):
-                    bm = [self.band_names[i] for i in ranked_bd[:k]]
-                    bl = [self.band_names[i] for i in ranked_bd[-k:]]
-                    f_rd_m.append(_subject_accuracy(
-                        net_f, _road_frequency_replace(X_f, bm, self.bands, self.sfreq),
-                        y_f, g_f, fold_subs, device))
-                    f_rd_l.append(_subject_accuracy(
-                        net_f, _road_frequency_replace(X_f, bl, self.bands, self.sfreq),
-                        y_f, g_f, fold_subs, device))
-
-                w = len(fold_subs)
-                for key, mf, lf in [
-                    ('spatial_ar',    s_ar_m, s_ar_l),
-                    ('spatial_road',  s_rd_m, s_rd_l),
-                    ('frequency_ar',  f_ar_m, f_ar_l),
-                    ('frequency_road',f_rd_m, f_rd_l),
-                ]:
+                for key, n_steps, morf_fn, lerf_fn in maskers:
+                    morf_list, lerf_list = [], []
+                    for k in range(1, n_steps + 1):
+                        morf_list.append(_subject_accuracy(net_f, morf_fn(k), y_f, g_f, fold_subs, device))
+                        lerf_list.append(_subject_accuracy(net_f, lerf_fn(k), y_f, g_f, fold_subs, device))
                     fd = fold_data[key]
-                    fd['morf'].append(np.array(mf))
-                    fd['lerf'].append(np.array(lf))
-                    fd['weights'].append(w)
+                    fd['morf'].append(np.array(morf_list))
+                    fd['lerf'].append(np.array(lerf_list))
+                    fd['weights'].append(len(fold_subs))
                     fd['bc'].append(bc)
                     fd['bf'].append(bf)
 
-            # Weighted average across folds
+            # Aggregate folds → cluster result
             for key in EXP_KEYS:
                 fd = fold_data[key]
-                total_w = sum(fd['weights'])
                 ws = fd['weights']
-                morf_curve = sum(m * (w / total_w)
-                                 for m, w in zip(fd['morf'], ws)).tolist()
-                lerf_curve = sum(l * (w / total_w)
-                                 for l, w in zip(fd['lerf'], ws)).tolist()
-                baseline_cluster = float(sum(b * w / total_w
-                                             for b, w in zip(fd['bc'], ws)))
-                baseline_fold = float(sum(b * w / total_w
-                                          for b, w in zip(fd['bf'], ws)))
+                morf_curve  = _weighted_avg(fd['morf'], ws).tolist()
+                lerf_curve  = _weighted_avg(fd['lerf'], ws).tolist()
+                baseline_cluster = float(_weighted_avg(fd['bc'], ws))
+                baseline_fold    = float(_weighted_avg(fd['bf'], ws))
 
-                aoc_c, auc_c, abc_c = self._compute_metrics(
-                    morf_curve, lerf_curve, baseline_cluster, n_classes)
-                aoc_f, auc_f, abc_f = self._compute_metrics(
-                    morf_curve, lerf_curve, baseline_fold, n_classes)
+                aoc_c, auc_c, abc_c = self._compute_metrics(morf_curve, lerf_curve, baseline_cluster, n_classes)
+                aoc_f, auc_f, abc_f = self._compute_metrics(morf_curve, lerf_curve, baseline_fold,    n_classes)
 
                 all_results[key][int(c)] = {
-                    'AOC_cluster_baseline': aoc_c,
-                    'AUC_cluster_baseline': auc_c,
-                    'ABC_cluster_baseline': abc_c,
-                    'AOC_fold_baseline':    aoc_f,
-                    'AUC_fold_baseline':    auc_f,
-                    'ABC_fold_baseline':    abc_f,
-                    'baseline_cluster': baseline_cluster,
-                    'baseline_fold':    baseline_fold,
+                    'AOC_cluster_baseline': aoc_c, 'AUC_cluster_baseline': auc_c, 'ABC_cluster_baseline': abc_c,
+                    'AOC_fold_baseline':    aoc_f, 'AUC_fold_baseline':    auc_f, 'ABC_fold_baseline':    abc_f,
+                    'baseline_cluster': baseline_cluster, 'baseline_fold': baseline_fold,
                     'morf_curve': [float(v) for v in morf_curve],
                     'lerf_curve': [float(v) for v in lerf_curve],
                     'n_subjects': len(cluster_subjects),
@@ -546,31 +463,24 @@ class FaithfulnessEvaluator:
                 print(f"  [{key}] Cluster {c}: "
                       f"AOC(cluster)={aoc_c:.3f}  AOC(fold)={aoc_f:.3f}  "
                       f"AUC(cluster)={auc_c:.3f}  ABC(cluster)={abc_c:.3f}  "
-                      f"(n={len(cluster_subjects)}, "
-                      f"baseline_cluster={baseline_cluster:.3f}, "
+                      f"(n={len(cluster_subjects)}, baseline_cluster={baseline_cluster:.3f}, "
                       f"baseline_fold={baseline_fold:.3f})")
 
-        # Overall weighted average per experiment type
+        # Overall weighted average
         for key in EXP_KEYS:
-            total = sum(all_results[key][int(c)]['n_subjects']
-                        for c in unique_clusters)
+            total = sum(all_results[key][int(c)]['n_subjects'] for c in unique_clusters)
             all_results[key]['overall'] = {
                 metric: float(sum(
-                    all_results[key][int(c)][metric]
-                    * all_results[key][int(c)]['n_subjects'] / total
+                    all_results[key][int(c)][metric] * all_results[key][int(c)]['n_subjects'] / total
                     for c in unique_clusters
                 ))
-                for metric in (
-                    'AOC_cluster_baseline', 'AUC_cluster_baseline', 'ABC_cluster_baseline',
-                    'AOC_fold_baseline',    'AUC_fold_baseline',    'ABC_fold_baseline',
-                )
+                for metric in ('AOC_cluster_baseline', 'AUC_cluster_baseline', 'ABC_cluster_baseline',
+                               'AOC_fold_baseline',    'AUC_fold_baseline',    'ABC_fold_baseline')
             }
             ov = all_results[key]['overall']
             print(f"  [{key}] Overall: "
-                  f"AOC(cluster)={ov['AOC_cluster_baseline']:.3f}  "
-                  f"AOC(fold)={ov['AOC_fold_baseline']:.3f}  "
-                  f"AUC(cluster)={ov['AUC_cluster_baseline']:.3f}  "
-                  f"ABC(cluster)={ov['ABC_cluster_baseline']:.3f}")
+                  f"AOC(cluster)={ov['AOC_cluster_baseline']:.3f}  AOC(fold)={ov['AOC_fold_baseline']:.3f}  "
+                  f"AUC(cluster)={ov['AUC_cluster_baseline']:.3f}  ABC(cluster)={ov['ABC_cluster_baseline']:.3f}")
 
         # Save — one JSON per experiment type
         save_dir = os.path.join(output_dir, dataset_name, 'faithfulness')
