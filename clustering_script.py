@@ -49,7 +49,7 @@ def main():
                                        gradient_method=gradient_method)
         cluster_labels = clustering_pipeline.run(gradients_list, subject_ids_list)
 
-        FaithfulnessEvaluator(BANDS, ch_names).evaluate(
+        FaithfulnessEvaluator(ch_names).evaluate(
             model, samples, targets, groups,
             gradients_list, cluster_labels, subject_ids_list,
             dataset_name, task, best_iteration, gradient_method,
