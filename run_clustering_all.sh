@@ -20,6 +20,15 @@ for dataset in "${DATASETS[@]}"; do
             echo "ERROR: run failed (exit code ${STATUS}). Continuing to next combination."
         fi
     done
+
+    echo "=========================================="
+    echo "Plotting masking curves for dataset=${dataset}"
+    echo "=========================================="
+    python plot_masking_curves.py --dataset "$dataset"
+    STATUS=$?
+    if [ $STATUS -ne 0 ]; then
+        echo "WARNING: plot_masking_curves failed for dataset=${dataset} (exit code ${STATUS})."
+    fi
 done
 
 echo "All ${TOTAL} runs completed."
