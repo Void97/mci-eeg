@@ -10,6 +10,7 @@ from scipy.optimize import curve_fit
 from torch.utils.data import DataLoader, TensorDataset
 
 from clustering_utils.constants import encode_groups, get_fold_splits
+from clustering_utils.spatial_road import noisy_spatial_imputer, get_datastruct
 
 EXP_KEYS = ['spatial_ar', 'spatial_road', 'frequency_ar', 'frequency_road']
 
@@ -178,15 +179,19 @@ def _find_neighbors(den, grad, ratio, mode):
 # AR replacement — PGD adversarial
 # ─────────────────────────────────────────────────────────────
 
-def _pgd_attack(net, x, y, epsilon, alpha=2.0, n_iter=10):
+def _pgd_attack(net, x, y, epsilon=1e-3, n_iter=10):
     """
-    Untargeted PGD with L2 ball constraint.
+    Untargeted PGD — exact port of XAI_tools_auto's mask_utils.pgd:
+      - L-infinity constraint: clamp to original data [x_min, x_max]
+      - Step size: epsilon / n_iter (same as eps = epsilon / iter_steps)
+      - Sign gradient update (no random start)
     x: (n, 1, n_ch, n_time) — model input format.
-    Returns adversarial examples as CPU tensor, same shape as x.
+    Returns adversarial examples as CPU numpy array, same shape as x.
     """
-    device = x.device
-    eps    = torch.tensor(epsilon, dtype=torch.float32, device=device)
-    x_adv  = x.clone().detach() + torch.zeros_like(x).uniform_(-1e-3, 1e-3)
+    x_min   = x.min().item()
+    x_max   = x.max().item()
+    step    = epsilon / n_iter
+    x_adv   = x.clone().detach()
 
     for _ in range(n_iter):
         x_adv = x_adv.detach().requires_grad_(True)
@@ -196,11 +201,10 @@ def _pgd_attack(net, x, y, epsilon, alpha=2.0, n_iter=10):
         F.cross_entropy(out, y).backward()
 
         with torch.no_grad():
-            x_adv = x_adv + alpha * x_adv.grad.sign()
-            delta  = x_adv - x
-            norms  = delta.norm(p=2, dim=(1, 2, 3), keepdim=True).clamp(min=1e-8)
-            delta  = delta * torch.min(torch.ones_like(norms), eps / norms)
-            x_adv  = x + delta
+            x_adv = torch.clamp(
+                x_adv + step * x_adv.grad.sign(),
+                min=x_min, max=x_max,
+            )
 
     return x_adv.detach().cpu()
 
@@ -209,33 +213,32 @@ def _pgd_attack(net, x, y, epsilon, alpha=2.0, n_iter=10):
 # ROAD replacement — spatial
 # ─────────────────────────────────────────────────────────────
 
-def _road_spatial_replace(samples, channels_to_mask, corr_matrix=None):
+def _road_spatial_replace(samples, channels_to_mask, datastruct):
     """
-    Replace masked channels with correlation-weighted average of remaining
-    channels + IQR-scaled noise.
-    samples: (n_trials, n_channels, n_time)
-    corr_matrix: optional precomputed (n_ch, n_ch) — pass to avoid recomputation.
+    Exact port of XAI_tools_auto's spatial ROAD imputer (interp_test).
+
+    For each trial: compute IQR-based noise std, then run noisy_spatial_imputer
+    to replace masked channels with a neighbour-weighted solution + noise,
+    rescaled to match the original data range.
+
+    samples:          (n_trials, n_channels, n_time)
+    channels_to_mask: list of channel indices to replace
+    datastruct:       _Dataset adjacency structure (from get_datastruct())
     """
     channels_to_mask = list(channels_to_mask)
-    n_trials, n_ch, n_time = samples.shape
-    keep_idx = [c for c in range(n_ch) if c not in channels_to_mask]
-    if not keep_idx:
-        return samples.copy()
-
-    if corr_matrix is None:
-        flat   = samples.transpose(1, 0, 2).reshape(n_ch, -1)
-        flat_z = flat - flat.mean(axis=1, keepdims=True)
-        norms  = np.linalg.norm(flat_z, axis=1, keepdims=True).clip(min=1e-8)
-        corr_matrix = (flat_z / norms) @ (flat_z / norms).T
-
     result = samples.copy()
-    for c in channels_to_mask:
-        w = np.abs(corr_matrix[c, keep_idx])
-        w /= w.sum() + 1e-8
-        result[:, c, :] = (
-            (samples[:, keep_idx, :] * w[None, :, None]).sum(axis=1)
-            + np.random.randn(n_trials, n_time) * samples[:, c, :].std() * 0.01
-        )
+
+    # Create imputer once per masking step (valid array depends only on mask+datastruct)
+    nsi = noisy_spatial_imputer(channels_to_mask, datastruct, noise=0.01)
+
+    for t in range(len(samples)):
+        q25, q75  = np.percentile(samples[t], 25), np.percentile(samples[t], 75)
+        iqr_mask  = (samples[t] >= q25) & (samples[t] <= q75)
+        nsi.noise = float(samples[t][iqr_mask].std()) if iqr_mask.any() else 0.01
+        # Only copy the masked channels — unmasked channels stay as original
+        # (matches XAI_tools_auto: mixtures[t, chrank[t]] = _return_imputed(...)[chrank[t]])
+        result[t, channels_to_mask, :] = nsi._return_imputed(samples[t])[channels_to_mask, :]
+
     return result
 
 
@@ -517,27 +520,21 @@ class FaithfulnessEvaluator:
       • baseline_fold:    trial-level accuracy on positive-class fold test subjects
     """
 
-    def __init__(self, ch_names, sfreq=200, pgd_alpha=2.0, pgd_n_iter=10):
+    def __init__(self, ch_names, sfreq=200):
         self.ch_names   = ch_names
         self.sfreq      = sfreq
-        self.pgd_alpha  = pgd_alpha
-        self.pgd_n_iter = pgd_n_iter
         self.n_channels = len(ch_names)
 
     def _rank_channels(self, centroid_grad):
         """centroid_grad: (n_ch, n_time) → channel indices sorted most-salient first."""
         return np.argsort(np.abs(centroid_grad).mean(axis=-1))[::-1].tolist()
 
-    def _compute_pgd(self, net, X_f, y_f, epsilon, device, batch_size=256):
+    def _compute_pgd(self, net, X_f, y_f, device, batch_size=256):
         chunks = []
         for i in range(0, len(X_f), batch_size):
             xb = torch.FloatTensor(X_f[i:i + batch_size]).unsqueeze(1).to(device)
             yb = torch.LongTensor(y_f[i:i + batch_size]).to(device)
-            chunks.append(
-                _pgd_attack(net, xb, yb, epsilon=epsilon,
-                            alpha=self.pgd_alpha, n_iter=self.pgd_n_iter)
-                .squeeze(1).numpy()
-            )
+            chunks.append(_pgd_attack(net, xb, yb).squeeze(1).numpy())
         return np.concatenate(chunks, axis=0)
 
     def _compute_metrics(self, morf_curve, lerf_curve, baseline, n_classes):
@@ -578,6 +575,7 @@ class FaithfulnessEvaluator:
             print(f"Loaded fold {fold} weights from {wp}")
 
         fold_test_indices = get_fold_splits(samples, targets, groups)
+        datastruct = get_datastruct(dataset_name, task)
 
         # Cluster centroids in RAW gradient space (n_ch, n_time)
         unique_clusters  = np.unique(cluster_labels)
@@ -655,15 +653,9 @@ class FaithfulnessEvaluator:
                 bf = _trial_accuracy(net_f, samples[test_idx][pos_mask],
                                      targets[test_idx][pos_mask], device)
 
-                epsilon = float(np.abs(X_f).max())
-                adv_f   = self._compute_pgd(net_f, X_f, y_f, epsilon, device)
+                adv_f = self._compute_pgd(net_f, X_f, y_f, device)
 
-                # Precompute once per fold
-                flat   = X_f.transpose(1, 0, 2).reshape(self.n_channels, -1)
-                flat_z = flat - flat.mean(axis=1, keepdims=True)
-                norms  = np.linalg.norm(flat_z, axis=1, keepdims=True).clip(min=1e-8)
-                corr_m = (flat_z / norms) @ (flat_z / norms).T
-                f_sp   = rfft(X_f, axis=-1)
+                f_sp = rfft(X_f, axis=-1)
 
                 road_cache_dir    = os.path.join(output_dir, dataset_name, 'road_freq_cache')
                 road_cache_prefix = (f'{dataset_name}_{task}_{model["name"]}'
@@ -675,8 +667,8 @@ class FaithfulnessEvaluator:
                      lambda k: _apply_spatial_ar(X_f, adv_f, ranked_ch[:k]),
                      lambda k: _apply_spatial_ar(X_f, adv_f, ranked_ch[-k:])),
                     ('spatial_road',  self.n_channels,
-                     lambda k: _road_spatial_replace(X_f, ranked_ch[:k],  corr_m),
-                     lambda k: _road_spatial_replace(X_f, ranked_ch[-k:], corr_m)),
+                     lambda k: _road_spatial_replace(X_f, ranked_ch[:k],  datastruct),
+                     lambda k: _road_spatial_replace(X_f, ranked_ch[-k:], datastruct)),
                     ('frequency_ar',  _N_FREQ_STEPS,
                      lambda k: _apply_frequency_ar(X_f, adv_f,
                                                    sub_bin_indices, bin_ranking_mo, k),
