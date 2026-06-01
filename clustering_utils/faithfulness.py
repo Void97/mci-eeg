@@ -180,12 +180,18 @@ def _find_neighbors(den, grad, ratio, mode):
 # AR replacement — PGD adversarial
 # ─────────────────────────────────────────────────────────────
 
-def _pgd_attack(net, x, y, epsilon=1e-3, n_iter=10):
+def _pgd_attack(net, x, y, epsilon=0.1, n_iter=10):
     """
-    Untargeted PGD — exact port of XAI_tools_auto's mask_utils.pgd:
+    Untargeted PGD matching XAI_tools_auto's mask_utils.pgd:
       - L-infinity constraint: clamp to original data [x_min, x_max]
-      - Step size: epsilon / n_iter (same as eps = epsilon / iter_steps)
-      - Sign gradient update (no random start)
+      - Step size: epsilon / n_iter
+      - Sign gradient update
+
+    epsilon=0.1 is calibrated for z-normalized EEG data (std≈1), giving
+    an equivalent relative perturbation to XAI_tools_auto's epsilon=1e-3
+    on raw (unnormalized) EEG.  XAI_tools_auto's 1e-3 was tuned for
+    unnormalized data; our data is z-normalized so we scale accordingly.
+
     x: (n, 1, n_ch, n_time) — model input format.
     Returns adversarial examples as CPU numpy array, same shape as x.
     """
