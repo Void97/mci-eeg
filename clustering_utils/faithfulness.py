@@ -15,13 +15,14 @@ from clustering_utils.spatial_road import noisy_spatial_imputer, get_datastruct
 EXP_KEYS = ['spatial_ar', 'spatial_road', 'frequency_ar', 'frequency_road']
 
 # Frequency masking: 20 steps at 5 % spectral-energy increments (matching XAI_tools_auto)
-_N_FREQ_STEPS = 20
+_N_FREQ_STEPS_AR   = 20   # frequency AR: 20 bins, k=1..20 (100% coverage)
+_N_FREQ_STEPS_ROAD = 10   # frequency ROAD: 10 steps, ratio=k×5% (5%..50%)
 _SQRT2 = np.sqrt(2)
 
 # Log-frequency bin boundaries for frequency AR — matches XAI_tools_auto exactly:
 #   F_MIN=1, F_MAX=100, N_BINS=20 → f_i = 1 * (100/1)^(i/20)
 _F_MIN, _F_MAX = 1.0, 100.0
-_LOG_BIN_BOUNDARIES = _F_MIN * (_F_MAX / _F_MIN) ** (np.arange(_N_FREQ_STEPS + 1) / _N_FREQ_STEPS)
+_LOG_BIN_BOUNDARIES = _F_MIN * (_F_MAX / _F_MIN) ** (np.arange(_N_FREQ_STEPS_AR + 1) / _N_FREQ_STEPS_AR)
 
 
 def _poly3(x, a, b, c, d):
@@ -43,9 +44,9 @@ def _compute_log_bins(n_time, sfreq):
     pos_freq = pos_freq[in_range]
     assign   = np.clip(
         np.searchsorted(_LOG_BIN_BOUNDARIES, pos_freq, side='right') - 1,
-        0, _N_FREQ_STEPS - 1,
+        0, _N_FREQ_STEPS_AR - 1,
     )
-    return [pos_idx[assign == i] for i in range(_N_FREQ_STEPS)]
+    return [pos_idx[assign == i] for i in range(_N_FREQ_STEPS_AR)]
 
 
 def _rank_logbins(centroid_fq, sub_bin_indices, mode):
@@ -669,19 +670,19 @@ class FaithfulnessEvaluator:
                     ('spatial_road',  self.n_channels,
                      lambda k: _road_spatial_replace(X_f, ranked_ch[:k],  datastruct),
                      lambda k: _road_spatial_replace(X_f, ranked_ch[-k:], datastruct)),
-                    ('frequency_ar',  _N_FREQ_STEPS,
+                    ('frequency_ar',  _N_FREQ_STEPS_AR,
                      lambda k: _apply_frequency_ar(X_f, adv_f,
                                                    sub_bin_indices, bin_ranking_mo, k),
                      lambda k: _apply_frequency_ar(X_f, adv_f,
                                                    sub_bin_indices, bin_ranking_le, k)),
-                    ('frequency_road', _N_FREQ_STEPS,
+                    ('frequency_road', _N_FREQ_STEPS_ROAD,
                      lambda k: _road_frequency_replace(
-                         X_f, centroid_fq, k / _N_FREQ_STEPS, 'mo', self.sfreq, f_sp,
+                         X_f, centroid_fq, k * 0.05, 'mo', self.sfreq, f_sp,
                          os.path.join(road_cache_dir,
                                       f'{road_cache_prefix}_k{k:02d}_mo.npy'),
                          device=device),
                      lambda k: _road_frequency_replace(
-                         X_f, centroid_fq, k / _N_FREQ_STEPS, 'le', self.sfreq, f_sp,
+                         X_f, centroid_fq, k * 0.05, 'le', self.sfreq, f_sp,
                          os.path.join(road_cache_dir,
                                       f'{road_cache_prefix}_k{k:02d}_le.npy'),
                          device=device)),
