@@ -3,7 +3,7 @@
 # Usage: bash run_clustering_all.sh
 
 # Available datasets: GENEEG, MCIvsHC, ADvsFTDvsHC, CAUEEG
-# Available gradients: vanilla, input_x_gradient, smoothgrad, smoothgrad_sq, vargrad
+# Available gradients: vanilla, input_x_gradient, smoothgrad, smoothgrad_sq, vargrad, integrated_gradients
 DATASETS=("GENEEG" "MCIvsHC" "ADvsFTDvsHC" "CAUEEG")
 GRADIENTS=("vanilla" "input_x_gradient" "smoothgrad" "smoothgrad_sq" "vargrad" "integrated_gradients")
 
