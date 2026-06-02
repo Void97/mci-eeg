@@ -26,15 +26,19 @@ class PSDConverter:
         return np.array(band_psd_sub).T
 
     def convert(self, saliency_maps, bands):
-        # saliency_maps: (N, n_ch, n_time) — process all subjects in one welch call
-        freqs, psd = welch(
-            saliency_maps, fs=self.sfreq,
-            axis=-1, nperseg=self.sfreq, noverlap=self.sfreq // 2,
-        )  # psd: (N, n_ch, n_freqs)
-        psd = psd / (psd.sum(axis=-1, keepdims=True) + 1e-8)
-        # extract_band_psd expects (n_ch, n_freqs) → apply per subject
-        return np.stack([self.extract_band_psd(freqs, psd[i], bands)
-                         for i in range(len(psd))])
+        welch_saliency_maps = []
+        for saliency_map in saliency_maps:
+            freqs, psd = welch(
+                saliency_map,
+                fs=self.sfreq,
+                axis=1,
+                nperseg=self.sfreq,
+                noverlap=self.sfreq // 2
+            )
+            psd = psd / (psd.sum() + 1e-8)
+            band_psd_sub = self.extract_band_psd(freqs, psd, bands)
+            welch_saliency_maps.append(band_psd_sub)
+        return np.array(welch_saliency_maps)
 
 
 class FeaturePreprocessor:
