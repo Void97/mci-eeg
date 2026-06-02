@@ -47,6 +47,9 @@ def captum_forward(model):
 def inference(dataset_name, task, model, samples, targets, groups,
               best_iteration, gradient_method='vanilla'):
 
+    # Split BEFORE encoding so fold assignments match the training splits
+    # (training used original string groups → alphabetical sort in StratifiedGroupKFold)
+    fold_splits = get_fold_splits(samples, targets, groups)
     groups = encode_groups(dataset_name, groups)
 
     save_dir = f'results/saliency_maps/{dataset_name}'
@@ -62,8 +65,6 @@ def inference(dataset_name, task, model, samples, targets, groups,
     gradients_list, negative_gradients_list = [], []
     subject_ids_list, negative_subject_ids_list = [], []
     subject_fold_map = {}
-
-    fold_splits = get_fold_splits(samples, targets, groups)
 
     for fold, test_index in fold_splits.items():
         test_subjects = np.unique(groups[test_index])
