@@ -5,11 +5,12 @@ import torch
 import torch.nn.functional as F
 from collections import defaultdict
 from numpy.fft import rfft, irfft, rfftfreq
+from scipy.signal import welch
 from scipy.stats import spearmanr
 from scipy.optimize import curve_fit
 from torch.utils.data import DataLoader, TensorDataset
 
-from clustering_utils.constants import encode_groups, get_fold_splits
+from clustering_utils.constants import encode_groups
 from clustering_utils.spatial_road import noisy_spatial_imputer, get_datastruct
 
 EXP_KEYS = ['spatial_ar', 'spatial_road', 'frequency_ar', 'frequency_road']
@@ -180,25 +181,20 @@ def _find_neighbors(den, grad, ratio, mode):
 # AR replacement — PGD adversarial
 # ─────────────────────────────────────────────────────────────
 
-def _pgd_attack(net, x, y, epsilon=0.1, n_iter=10):
+def _pgd_attack(net, x, y, epsilon, alpha=2.0, n_iter=10):
     """
-    Untargeted PGD matching XAI_tools_auto's mask_utils.pgd:
-      - L-infinity constraint: clamp to original data [x_min, x_max]
-      - Step size: epsilon / n_iter
-      - Sign gradient update
-
-    epsilon=0.1 is calibrated for z-normalized EEG data (std≈1), giving
-    an equivalent relative perturbation to XAI_tools_auto's epsilon=1e-3
-    on raw (unnormalized) EEG.  XAI_tools_auto's 1e-3 was tuned for
-    unnormalized data; our data is z-normalized so we scale accordingly.
+    Untargeted PGD matching the mdAR paper (eq. 14):
+      - x0 = x + ε  (random initialisation within ε-ball)
+      - x_iter = Proj_ε( x_{iter-1} + α × sign∇Loss(x_iter, y) )
+      - L₂ ball with radius ε = max|x| (extreme values of original data)
+      - α = 2, iterations = 10, cross-entropy loss, y = y_true
 
     x: (n, 1, n_ch, n_time) — model input format.
     Returns adversarial examples as CPU numpy array, same shape as x.
     """
-    x_min   = x.min().item()
-    x_max   = x.max().item()
-    step    = epsilon / n_iter
-    x_adv   = x.clone().detach()
+    device = x.device
+    eps    = torch.tensor(epsilon, dtype=torch.float32, device=device)
+    x_adv  = x.clone().detach() + torch.zeros_like(x).uniform_(-1e-3, 1e-3)
 
     for _ in range(n_iter):
         x_adv = x_adv.detach().requires_grad_(True)
@@ -208,10 +204,11 @@ def _pgd_attack(net, x, y, epsilon=0.1, n_iter=10):
         F.cross_entropy(out, y).backward()
 
         with torch.no_grad():
-            x_adv = torch.clamp(
-                x_adv + step * x_adv.grad.sign(),
-                min=x_min, max=x_max,
-            )
+            x_adv = x_adv + alpha * x_adv.grad.sign()
+            delta  = x_adv - x
+            norms  = delta.norm(p=2, dim=(1, 2, 3), keepdim=True).clamp(min=1e-8)
+            delta  = delta * torch.min(torch.ones_like(norms), eps / norms)
+            x_adv  = x + delta
 
     return x_adv.detach().cpu()
 
@@ -437,21 +434,6 @@ def _subject_accuracy(net, samples_np, targets_np, groups, subject_ids, device,
     return correct / len(subject_ids)
 
 
-def _trial_accuracy(net, samples_np, targets_np, device, batch_size=64):
-    """Trial-level accuracy for fold-level baseline."""
-    net.eval()
-    x = torch.FloatTensor(samples_np).unsqueeze(1)
-    y = torch.LongTensor(targets_np)
-    correct, total = 0, 0
-    with torch.no_grad():
-        for bx, by in DataLoader(TensorDataset(x, y), batch_size=batch_size):
-            out = net(bx.to(device))
-            if isinstance(out, tuple):
-                out = out[0]
-            correct += (out.argmax(dim=1).cpu() == by).sum().item()
-            total   += len(by)
-    return correct / total if total > 0 else 0.0
-
 
 # ─────────────────────────────────────────────────────────────
 # Spearman consistency
@@ -532,16 +514,16 @@ class FaithfulnessEvaluator:
         self.sfreq      = sfreq
         self.n_channels = len(ch_names)
 
-    def _rank_channels(self, centroid_grad):
-        """centroid_grad: (n_ch, n_time) → channel indices sorted most-salient first."""
-        return np.argsort(np.abs(centroid_grad).mean(axis=-1))[::-1].tolist()
+    def _rank_channels(self, centroid_fq):
+        """centroid_fq: (n_ch, n_freqs) complex FFT centroid → channel indices sorted most-salient first."""
+        return np.argsort(np.abs(centroid_fq).mean(axis=-1))[::-1].tolist()
 
-    def _compute_pgd(self, net, X_f, y_f, device, batch_size=256):
+    def _compute_pgd(self, net, X_f, y_f, epsilon, device, batch_size=256):
         chunks = []
         for i in range(0, len(X_f), batch_size):
             xb = torch.FloatTensor(X_f[i:i + batch_size]).unsqueeze(1).to(device)
             yb = torch.LongTensor(y_f[i:i + batch_size]).to(device)
-            chunks.append(_pgd_attack(net, xb, yb).squeeze(1).numpy())
+            chunks.append(_pgd_attack(net, xb, yb, epsilon=epsilon).squeeze(1).numpy())
         return np.concatenate(chunks, axis=0)
 
     def _compute_metrics(self, morf_curve, lerf_curve, baseline, n_classes):
@@ -560,7 +542,8 @@ class FaithfulnessEvaluator:
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        groups            = encode_groups(dataset_name, groups)
+        # Split BEFORE encoding to match training fold assignments
+        groups = encode_groups(dataset_name, groups)
         subject_ids_list  = np.array(subject_ids_list, dtype=np.int64)
         cluster_labels    = np.array(cluster_labels)
 
@@ -581,21 +564,18 @@ class FaithfulnessEvaluator:
             fold_nets[fold] = net_f
             print(f"Loaded fold {fold} weights from {wp}")
 
-        fold_test_indices = get_fold_splits(samples, targets, groups)
         datastruct = get_datastruct(dataset_name, task)
 
         # Cluster centroids in RAW gradient space (n_ch, n_time)
         unique_clusters  = np.unique(cluster_labels)
         subj_to_cluster  = dict(zip(subject_ids_list, cluster_labels))
-        raw_centroids    = {
-            c: gradients_list[cluster_labels == c].mean(axis=0)
+        # Cluster centroids: FFT of mean gradient per cluster (matches XAI_tools_auto
+        # which uses fft(grad) per trial; abs is taken internally by find_neighbors
+        # and rank_logbins, so the sign of the input does not affect ranking).
+        centroids = {
+            c: rfft(gradients_list[cluster_labels == c].mean(axis=0), axis=-1)
             for c in unique_clusters
-        }  # each centroid: (n_ch, n_time)
-        # FFT of centroids for frequency masking
-        centroid_fqs = {
-            c: rfft(raw_centroids[c], axis=-1)   # (n_ch, n_freqs)
-            for c in unique_clusters
-        }
+        }  # (n_ch, n_rfft_freqs) — complex FFT of mean gradient
 
         # Log-frequency bin layout — computed once per dataset/time resolution
         sub_bin_indices = _compute_log_bins(samples.shape[-1], self.sfreq)
@@ -609,8 +589,8 @@ class FaithfulnessEvaluator:
 
         for c in unique_clusters:
             cluster_subjects = [sid for sid in subject_ids_list if subj_to_cluster[sid] == c]
-            ranked_ch      = self._rank_channels(raw_centroids[c])
-            centroid_fq    = centroid_fqs[c]
+            centroid_fq    = centroids[c]              # (n_ch, n_rfft_freqs) complex
+            ranked_ch      = self._rank_channels(centroid_fq)
             bin_ranking_mo = _rank_logbins(centroid_fq, sub_bin_indices, 'mo')
             bin_ranking_le = _rank_logbins(centroid_fq, sub_bin_indices, 'le')
 
@@ -620,7 +600,7 @@ class FaithfulnessEvaluator:
             print(f"Cluster {c}: {len(cluster_subjects)} subjects "
                   f"across {len(fold_to_subjects)} fold(s)")
 
-            fold_data = {k: dict(morf=[], lerf=[], weights=[], bc=[], bf=[])
+            fold_data = {k: dict(morf=[], lerf=[], weights=[], bc=[])
                          for k in EXP_KEYS}
 
             curves_dir = os.path.join(output_dir, dataset_name, 'faithfulness_curves')
@@ -644,7 +624,6 @@ class FaithfulnessEvaluator:
                         fd['lerf'].append(np.array(cached[key]['lerf']))
                         fd['weights'].append(len(fold_subs))
                         fd['bc'].append(cached[key]['bc'])
-                        fd['bf'].append(cached[key]['bf'])
                     print(f"  Loaded curves from cache: cluster {c}, fold {fold}")
                     continue
                 # ────────────────────────────────────────────────────────────
@@ -654,13 +633,9 @@ class FaithfulnessEvaluator:
                 X_f, y_f, g_f = samples_c[f_mask], targets_c[f_mask], groups_c[f_mask]
 
                 bc = _subject_accuracy(net_f, X_f, y_f, g_f, fold_subs, device)
-                target_class = 0 if task == 'MCI vs Dementia' else 1
-                test_idx     = fold_test_indices[fold]
-                pos_mask     = targets[test_idx] == target_class
-                bf = _trial_accuracy(net_f, samples[test_idx][pos_mask],
-                                     targets[test_idx][pos_mask], device)
 
-                adv_f = self._compute_pgd(net_f, X_f, y_f, device)
+                epsilon = float(np.abs(X_f).max())
+                adv_f   = self._compute_pgd(net_f, X_f, y_f, epsilon, device)
 
                 f_sp = rfft(X_f, axis=-1)
 
@@ -702,14 +677,12 @@ class FaithfulnessEvaluator:
                                                            y_f, g_f, fold_subs, device))
                         lerf_list.append(_subject_accuracy(net_f, lerf_fn(k),
                                                            y_f, g_f, fold_subs, device))
-                    fold_curves[key] = {'morf': morf_list, 'lerf': lerf_list,
-                                        'bc': bc, 'bf': bf}
+                    fold_curves[key] = {'morf': morf_list, 'lerf': lerf_list, 'bc': bc}
                     fd = fold_data[key]
                     fd['morf'].append(np.array(morf_list))
                     fd['lerf'].append(np.array(lerf_list))
                     fd['weights'].append(len(fold_subs))
                     fd['bc'].append(bc)
-                    fd['bf'].append(bf)
 
                 # Save curve cache for this fold
                 with open(curve_cache, 'w') as fh:
@@ -720,31 +693,22 @@ class FaithfulnessEvaluator:
             for key in EXP_KEYS:
                 fd  = fold_data[key]
                 ws  = fd['weights']
-                morf_curve       = _weighted_avg(fd['morf'], ws).tolist()
-                lerf_curve       = _weighted_avg(fd['lerf'], ws).tolist()
-                baseline_cluster = float(_weighted_avg(fd['bc'], ws))
-                baseline_fold    = float(_weighted_avg(fd['bf'], ws))
+                morf_curve = _weighted_avg(fd['morf'], ws).tolist()
+                lerf_curve = _weighted_avg(fd['lerf'], ws).tolist()
+                baseline   = float(_weighted_avg(fd['bc'], ws))
 
-                aoc_c, auc_c, abc_c = self._compute_metrics(
-                    morf_curve, lerf_curve, baseline_cluster, n_classes)
-                aoc_f, auc_f, abc_f = self._compute_metrics(
-                    morf_curve, lerf_curve, baseline_fold, n_classes)
+                aoc, auc, abc = self._compute_metrics(morf_curve, lerf_curve, baseline, n_classes)
 
                 all_results[key][int(c)] = {
-                    'AOC_cluster_baseline': aoc_c, 'AUC_cluster_baseline': auc_c,
-                    'ABC_cluster_baseline': abc_c, 'AOC_fold_baseline':    aoc_f,
-                    'AUC_fold_baseline':    auc_f, 'ABC_fold_baseline':    abc_f,
-                    'baseline_cluster': baseline_cluster, 'baseline_fold': baseline_fold,
+                    'AOC': aoc, 'AUC': auc, 'ABC': abc,
+                    'baseline': baseline,
                     'morf_curve': [float(v) for v in morf_curve],
                     'lerf_curve': [float(v) for v in lerf_curve],
                     'n_subjects': len(cluster_subjects),
                 }
                 print(f"  [{key}] Cluster {c}: "
-                      f"AOC(cluster)={aoc_c:.3f}  AOC(fold)={aoc_f:.3f}  "
-                      f"AUC(cluster)={auc_c:.3f}  ABC(cluster)={abc_c:.3f}  "
-                      f"(n={len(cluster_subjects)}, "
-                      f"baseline_cluster={baseline_cluster:.3f}, "
-                      f"baseline_fold={baseline_fold:.3f})")
+                      f"AOC={aoc:.3f}  AUC={auc:.3f}  ABC={abc:.3f}  "
+                      f"(n={len(cluster_subjects)}, baseline={baseline:.3f})")
 
         # Overall weighted average
         for key in EXP_KEYS:
@@ -755,16 +719,10 @@ class FaithfulnessEvaluator:
                     * all_results[key][int(c)]['n_subjects'] / total
                     for c in unique_clusters
                 ))
-                for metric in ('AOC_cluster_baseline', 'AUC_cluster_baseline',
-                               'ABC_cluster_baseline', 'AOC_fold_baseline',
-                               'AUC_fold_baseline',    'ABC_fold_baseline')
+                for metric in ('AOC', 'AUC', 'ABC')
             }
             ov = all_results[key]['overall']
-            print(f"  [{key}] Overall: "
-                  f"AOC(cluster)={ov['AOC_cluster_baseline']:.3f}  "
-                  f"AOC(fold)={ov['AOC_fold_baseline']:.3f}  "
-                  f"AUC(cluster)={ov['AUC_cluster_baseline']:.3f}  "
-                  f"ABC(cluster)={ov['ABC_cluster_baseline']:.3f}")
+            print(f"  [{key}] Overall: AOC={ov['AOC']:.3f}  AUC={ov['AUC']:.3f}  ABC={ov['ABC']:.3f}")
 
         # Save — one JSON per experiment type
         save_dir = os.path.join(output_dir, dataset_name, 'faithfulness')
