@@ -5,29 +5,20 @@ import torch
 import torch.nn.functional as F
 from collections import defaultdict
 from numpy.fft import rfft, irfft, rfftfreq
-from scipy.signal import welch
 from scipy.stats import spearmanr
-from scipy.optimize import curve_fit
 from torch.utils.data import DataLoader, TensorDataset
 
 from clustering_utils.constants import encode_groups
-from clustering_utils.spatial_road import noisy_spatial_imputer, get_datastruct
-
-EXP_KEYS = ['spatial_ar', 'spatial_road', 'frequency_ar', 'frequency_road']
+EXP_KEYS = ['spatial_ar', 'frequency_ar']
 
 # Frequency masking: 20 steps at 5 % spectral-energy increments (matching XAI_tools_auto)
 _N_FREQ_STEPS_AR   = 20   # frequency AR: 20 bins, k=1..20 (100% coverage)
-_N_FREQ_STEPS_ROAD = 10   # frequency ROAD: 10 steps, ratio=k×5% (5%..50%)
 _SQRT2 = np.sqrt(2)
 
 # Log-frequency bin boundaries for frequency AR — matches XAI_tools_auto exactly:
 #   F_MIN=1, F_MAX=100, N_BINS=20 → f_i = 1 * (100/1)^(i/20)
 _F_MIN, _F_MAX = 1.0, 100.0
 _LOG_BIN_BOUNDARIES = _F_MIN * (_F_MAX / _F_MIN) ** (np.arange(_N_FREQ_STEPS_AR + 1) / _N_FREQ_STEPS_AR)
-
-
-def _poly3(x, a, b, c, d):
-    return a * x**3 + b * x**2 + c * x + d
 
 
 def _compute_log_bins(n_time, sfreq):
@@ -181,20 +172,19 @@ def _find_neighbors(den, grad, ratio, mode):
 # AR replacement — PGD adversarial
 # ─────────────────────────────────────────────────────────────
 
-def _pgd_attack(net, x, y, epsilon, alpha=2.0, n_iter=10):
+def _pgd_attack(net, x, y, epsilon, n_iter=20):
     """
-    Untargeted PGD matching the mdAR paper (eq. 14):
-      - x0 = x + ε  (random initialisation within ε-ball)
-      - x_iter = Proj_ε( x_{iter-1} + α × sign∇Loss(x_iter, y) )
-      - L₂ ball with radius ε = max|x| (extreme values of original data)
-      - α = 2, iterations = 10, cross-entropy loss, y = y_true
+    L∞ PGD matching XAI_tools_auto (mask_utils.pgd):
+      - step = epsilon / n_iter
+      - clamp to original data range [x_min, x_max] each step
 
-    x: (n, 1, n_ch, n_time) — model input format.
+    x: (n, 1, n_ch, n_time) on device.
     Returns adversarial examples as CPU numpy array, same shape as x.
     """
-    device = x.device
-    eps    = torch.tensor(epsilon, dtype=torch.float32, device=device)
-    x_adv  = x.clone().detach() + torch.zeros_like(x).uniform_(-1e-3, 1e-3)
+    x_min = x.min().item()
+    x_max = x.max().item()
+    step  = epsilon / n_iter
+    x_adv = x.clone().detach()
 
     for _ in range(n_iter):
         x_adv = x_adv.detach().requires_grad_(True)
@@ -204,46 +194,72 @@ def _pgd_attack(net, x, y, epsilon, alpha=2.0, n_iter=10):
         F.cross_entropy(out, y).backward()
 
         with torch.no_grad():
-            x_adv = x_adv + alpha * x_adv.grad.sign()
-            delta  = x_adv - x
-            norms  = delta.norm(p=2, dim=(1, 2, 3), keepdim=True).clamp(min=1e-8)
-            delta  = delta * torch.min(torch.ones_like(norms), eps / norms)
-            x_adv  = x + delta
+            x_adv = torch.clamp(x_adv + step * x_adv.grad.sign(), x_min, x_max)
 
     return x_adv.detach().cpu()
 
 
-# ─────────────────────────────────────────────────────────────
-# ROAD replacement — spatial
-# ─────────────────────────────────────────────────────────────
-
-def _road_spatial_replace(samples, channels_to_mask, datastruct):
+def _auto_epsilon(net, X_f, y_f, device, n_classes, batch_size=256):
     """
-    Exact port of XAI_tools_auto's spatial ROAD imputer (interp_test).
-
-    For each trial: compute IQR-based noise std, then run noisy_spatial_imputer
-    to replace masked channels with a neighbour-weighted solution + noise,
-    rescaled to match the original data range.
-
-    samples:          (n_trials, n_channels, n_time)
-    channels_to_mask: list of channel indices to replace
-    datastruct:       _Dataset adjacency structure (from get_datastruct())
+    Find minimum epsilon driving trial-level accuracy to chance (1/n_classes).
+    Exact port of XAI_tools_auto's exponential probe + binary search.
+    Calibrated on cluster fold subjects to match evaluation scope.
+    Returns (adv_numpy (n, n_ch, n_time), epsilon).
     """
-    channels_to_mask = list(channels_to_mask)
-    result = samples.copy()
+    chance    = 1.0 / n_classes
+    tolerance = 0.01
 
-    # Create imputer once per masking step (valid array depends only on mask+datastruct)
-    nsi = noisy_spatial_imputer(channels_to_mask, datastruct, noise=0.01)
+    def run(eps):
+        x = torch.FloatTensor(X_f).unsqueeze(1).to(device)
+        y = torch.LongTensor(y_f).to(device)
+        adv = _pgd_attack(net, x, y, epsilon=eps).squeeze(1).numpy()
+        loader = DataLoader(
+            TensorDataset(torch.FloatTensor(adv).unsqueeze(1), torch.LongTensor(y_f)),
+            batch_size=batch_size,
+        )
+        correct = total = 0
+        with torch.no_grad():
+            for bx, by in loader:
+                out = net(bx.to(device))
+                if isinstance(out, tuple):
+                    out = out[0]
+                correct += (out.argmax(1).cpu() == by).sum().item()
+                total   += len(by)
+        return adv, correct / total
 
-    for t in range(len(samples)):
-        q25, q75  = np.percentile(samples[t], 25), np.percentile(samples[t], 75)
-        iqr_mask  = (samples[t] >= q25) & (samples[t] <= q75)
-        nsi.noise = float(samples[t][iqr_mask].std()) if iqr_mask.any() else 0.01
-        # Only copy the masked channels — unmasked channels stay as original
-        # (matches XAI_tools_auto: mixtures[t, chrank[t]] = _return_imputed(...)[chrank[t]])
-        result[t, channels_to_mask, :] = nsi._return_imputed(samples[t])[channels_to_mask, :]
+    eps, eps_max = 1e-4, 10.0
+    best_adv = best_eps = acc = None
 
-    return result
+    # Phase 1: exponential probe
+    while eps <= eps_max:
+        adv, acc = run(eps)
+        print(f"  [eps probe] eps={eps:.2e}  trial_acc={acc:.3f}")
+        if abs(acc - chance) <= tolerance:
+            best_adv, best_eps = adv, eps
+            break
+        if acc <= chance:
+            break
+        eps *= 2
+
+    # Phase 2: binary search
+    if best_adv is None and eps <= eps_max:
+        lo, hi = eps / 2, eps
+        for i in range(15):
+            mid = (lo + hi) / 2
+            adv, acc = run(mid)
+            print(f"  [eps search {i+1}] eps={mid:.2e}  trial_acc={acc:.3f}")
+            if abs(acc - chance) <= tolerance:
+                best_adv, best_eps = adv, mid
+                break
+            lo, hi = (mid, hi) if acc > chance else (lo, mid)
+        if best_adv is None:
+            best_adv, best_eps = adv, mid
+
+    if best_adv is None:
+        raise RuntimeError(f"Auto epsilon search failed: exceeded eps_max={eps_max}")
+
+    print(f"  Auto epsilon: {best_eps:.2e}  (trial_acc={acc:.3f})")
+    return best_adv, best_eps
 
 
 # ─────────────────────────────────────────────────────────────
@@ -254,29 +270,6 @@ def _apply_spatial_ar(samples, adv_samples, channels):
     result = samples.copy()
     result[:, channels, :] = adv_samples[:, channels, :]
     return result
-
-
-# ─────────────────────────────────────────────────────────────
-# Frequency masking — shared neighbour-finding helpers
-# ─────────────────────────────────────────────────────────────
-
-def _freq_neighbor_region(specs_t, centroid_fq, ratio, mode):
-    """
-    For a single trial's spectrum `specs_t` (n_ch, n_freqs) and the
-    cluster-centroid gradient spectrum `centroid_fq` (n_ch, n_freqs),
-    call _find_neighbors and return the absolute (lo, hi) indices
-    into the full rfft array.
-
-    uq = n_freqs - 1 excludes the Nyquist bin, matching XAI_tools_auto's
-    convention (uq_freqs = index of -sfreq/2 in full FFT = n//2).
-    """
-    uq = specs_t.shape[-1] - 1          # exclude Nyquist (matches XAI_tools_auto)
-    _, (lo, hi), _ = _find_neighbors(
-        specs_t[:, 1:uq],
-        np.abs(centroid_fq[:, 1:uq]),
-        ratio, mode,
-    )
-    return lo, hi
 
 
 # ─────────────────────────────────────────────────────────────
@@ -305,104 +298,6 @@ def _apply_frequency_ar(samples, adv_samples, sub_bin_indices, bin_ranking, k):
         specs[:, :, pos] = adv_specs[:, :, pos]
 
     return irfft(specs, n=n_time, axis=-1).astype(np.float32)
-
-
-# ─────────────────────────────────────────────────────────────
-# Frequency ROAD — exact XAI_tools_auto polynomial approach
-# ─────────────────────────────────────────────────────────────
-
-def _road_frequency_replace(samples, centroid_fq, ratio, mode, sfreq,
-                             specs=None, cache_path=None, device=None):
-    """
-    XAI_tools_auto ROAD for frequency domain.
-
-    Polynomial fitting is batched across all trials in one GPU lstsq call
-    (replaces per-trial curve_fit — ~1000× faster on GPU).  Boundary
-    conditions are dropped since they affect only 2 of 399 fit points and
-    have negligible effect on the polynomial shape.  CPU fallback is used
-    when device is None or CUDA is unavailable.
-
-    cache_path: optional .npy — loaded directly if it exists, skipping all
-                computation (matches XAI_tools_auto's .mat caching convention).
-    centroid_fq: (n_ch, n_freqs) — rfft of cluster centroid gradient
-    """
-    if cache_path and os.path.exists(cache_path):
-        return np.load(cache_path)
-
-    n_trials, _, n_time = samples.shape
-    f     = rfftfreq(n_time, d=1.0 / sfreq)
-    lowfq = 1
-    uq    = len(f) - 1   # exclude Nyquist
-
-    out     = rfft(samples, axis=-1).copy() if specs is None else specs.copy()
-    grad_fq = np.abs(centroid_fq)
-    x_full  = 1.0 / f[lowfq:uq]   # (n_fit,) — 1/f axis
-
-    # ── Single find_neighbors on cluster-mean spectrum ────────────────────
-    # Using the cluster-mean spectrum (instead of per-trial) gives one
-    # shared (lo, hi) for all trials — consistent with cluster-level
-    # evaluation and eliminates the per-trial find_neighbors loop.
-    mean_spec = out.mean(axis=0)   # (n_ch, n_freqs) — mean over trials
-    lo, hi = _freq_neighbor_region(mean_spec, centroid_fq, ratio, mode)
-    x_mask = 1.0 / f[lo:hi + 1].clip(1e-8)   # (n_mask,)
-
-    # ── GPU batch lstsq + vectorised polynomial evaluation ────────────────
-    use_gpu = (device is not None and torch.cuda.is_available())
-    if use_gpu:
-        xt = torch.tensor(x_full, dtype=torch.float32, device=device)
-        A  = torch.stack([xt**3, xt**2, xt, torch.ones_like(xt)], dim=1)  # (n_fit, 4)
-        Y  = torch.tensor(
-            np.abs(out[:, :, lowfq:uq]).mean(axis=1) / _SQRT2,
-            dtype=torch.float32, device=device,
-        )  # (n_trials, n_fit)
-        driver   = 'gels' if device.type == 'cuda' else 'gelsd'
-        popt_all = torch.linalg.lstsq(A, Y.T, driver=driver).solution  # (4, n_trials)
-
-        xmt = torch.tensor(x_mask, dtype=torch.float32, device=device)
-        Am  = torch.stack([xmt**3, xmt**2, xmt, torch.ones_like(xmt)], dim=1)  # (n_mask, 4)
-        impt_all = (Am @ popt_all).cpu().numpy()  # (n_mask, n_trials)
-
-        # Fully vectorised sign preservation and replacement
-        real_sign = np.sign(out[:, :, lo:hi + 1].real); real_sign[real_sign == 0] = 1
-        imag_sign = np.sign(out[:, :, lo:hi + 1].imag); imag_sign[imag_sign == 0] = 1
-        # impt_all: (n_mask, n_trials) → transpose to (n_trials, n_mask)
-        imp = impt_all.T[:, np.newaxis, :]  # (n_trials, 1, n_mask) — broadcast over channels
-        out[:, :, lo:hi + 1] = (imp * real_sign) + 1j * (imp * imag_sign)
-    else:
-        # CPU fallback — original curve_fit per trial with boundary conditions
-        lo_positive = f[lo] > 0
-        bc_lo_x = 1.0 / (f[lo] if lo_positive else f[lowfq])
-        bc_lo_v = grad_fq[:, lo if lo_positive else lowfq].mean() / _SQRT2
-        bc_hi_x = 1.0 / f[hi].clip(1e-8)
-        bc_hi_v = grad_fq[:, hi].mean() / _SQRT2
-
-        for t in range(n_trials):
-            y_full = np.abs(out[t, :, lowfq:uq]).mean(axis=0) / _SQRT2
-
-            def overf(x, a, b, c, d):
-                yfit = _poly3(x, a, b, c, d)
-                if lo_positive:
-                    yfit[x == bc_lo_x] = bc_lo_v
-                else:
-                    yfit[x > 1.0 / f[lowfq]] = bc_lo_v
-                yfit[x == bc_hi_x] = bc_hi_v
-                return yfit
-
-            try:
-                popt, _ = curve_fit(overf, x_full, y_full, maxfev=5000)
-                impt = _poly3(x_mask, *popt)
-            except RuntimeError:
-                impt = np.full(len(x_mask), y_full.mean())
-
-            real_sign = np.sign(out[t, :, lo:hi + 1].real); real_sign[real_sign == 0] = 1
-            imag_sign = np.sign(out[t, :, lo:hi + 1].imag); imag_sign[imag_sign == 0] = 1
-            out[t, :, lo:hi + 1] = (impt * real_sign) + 1j * (impt * imag_sign)
-
-    result = irfft(out, n=n_time, axis=-1).astype(np.float32)
-    if cache_path:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        np.save(cache_path, result)
-    return result
 
 
 # ─────────────────────────────────────────────────────────────
@@ -500,9 +395,8 @@ class FaithfulnessEvaluator:
     frequency masking via XAI_tools_auto's find_neighbors algorithm.
 
     Experiments:
-      • spatial_ar / spatial_road   — mask channels, k = 1 … n_channels
-      • frequency_ar / frequency_road — mask frequency region, k = 1 … 20
-        (each step k masks the region containing k×5 % of spectral energy)
+      • spatial_ar   — mask channels, k = 1 … n_channels
+      • frequency_ar — mask 20 log-spaced frequency bins
 
     Two baselines per fold:
       • baseline_cluster: subject-level accuracy on cluster subjects (= 1.0 by design)
@@ -518,13 +412,11 @@ class FaithfulnessEvaluator:
         """centroid_fq: (n_ch, n_freqs) complex FFT centroid → channel indices sorted most-salient first."""
         return np.argsort(np.abs(centroid_fq).mean(axis=-1))[::-1].tolist()
 
-    def _compute_pgd(self, net, X_f, y_f, epsilon, device, batch_size=256):
-        chunks = []
-        for i in range(0, len(X_f), batch_size):
-            xb = torch.FloatTensor(X_f[i:i + batch_size]).unsqueeze(1).to(device)
-            yb = torch.LongTensor(y_f[i:i + batch_size]).to(device)
-            chunks.append(_pgd_attack(net, xb, yb, epsilon=epsilon).squeeze(1).numpy())
-        return np.concatenate(chunks, axis=0)
+    def _compute_pgd(self, net, X_f, y_f, device):
+        """Run auto epsilon search then return adversarial examples (n, n_ch, n_time)."""
+        n_classes = 2  # binary classification throughout
+        adv_f, _ = _auto_epsilon(net, X_f, y_f, device, n_classes)
+        return adv_f
 
     def _compute_metrics(self, morf_curve, lerf_curve, baseline, n_classes):
         chance = 1.0 / n_classes
@@ -564,7 +456,6 @@ class FaithfulnessEvaluator:
             fold_nets[fold] = net_f
             print(f"Loaded fold {fold} weights from {wp}")
 
-        datastruct = get_datastruct(dataset_name, task)
 
         # Cluster centroids in RAW gradient space (n_ch, n_time)
         unique_clusters  = np.unique(cluster_labels)
@@ -632,41 +523,20 @@ class FaithfulnessEvaluator:
                 f_mask         = np.isin(groups_c, fold_subs)
                 X_f, y_f, g_f = samples_c[f_mask], targets_c[f_mask], groups_c[f_mask]
 
-                bc = _subject_accuracy(net_f, X_f, y_f, g_f, fold_subs, device)
-
-                epsilon = float(np.abs(X_f).max())
-                adv_f   = self._compute_pgd(net_f, X_f, y_f, epsilon, device)
+                bc    = _subject_accuracy(net_f, X_f, y_f, g_f, fold_subs, device)
+                adv_f = self._compute_pgd(net_f, X_f, y_f, device)
 
                 f_sp = rfft(X_f, axis=-1)
 
-                road_cache_dir    = os.path.join(output_dir, dataset_name, 'road_freq_cache')
-                road_cache_prefix = (f'{dataset_name}_{task}_{model["name"]}'
-                                     f'_iter_{best_iteration}_{gradient_method}'
-                                     f'_cluster{c}_fold{fold}')
-
                 maskers = [
-                    ('spatial_ar',    self.n_channels,
+                    ('spatial_ar',   self.n_channels,
                      lambda k: _apply_spatial_ar(X_f, adv_f, ranked_ch[:k]),
                      lambda k: _apply_spatial_ar(X_f, adv_f, ranked_ch[-k:])),
-                    ('spatial_road',  self.n_channels,
-                     lambda k: _road_spatial_replace(X_f, ranked_ch[:k],  datastruct),
-                     lambda k: _road_spatial_replace(X_f, ranked_ch[-k:], datastruct)),
-                    ('frequency_ar',  _N_FREQ_STEPS_AR,
+                    ('frequency_ar', _N_FREQ_STEPS_AR,
                      lambda k: _apply_frequency_ar(X_f, adv_f,
                                                    sub_bin_indices, bin_ranking_mo, k),
                      lambda k: _apply_frequency_ar(X_f, adv_f,
                                                    sub_bin_indices, bin_ranking_le, k)),
-                    ('frequency_road', _N_FREQ_STEPS_ROAD,
-                     lambda k: _road_frequency_replace(
-                         X_f, centroid_fq, k * 0.05, 'mo', self.sfreq, f_sp,
-                         os.path.join(road_cache_dir,
-                                      f'{road_cache_prefix}_k{k:02d}_mo.npy'),
-                         device=device),
-                     lambda k: _road_frequency_replace(
-                         X_f, centroid_fq, k * 0.05, 'le', self.sfreq, f_sp,
-                         os.path.join(road_cache_dir,
-                                      f'{road_cache_prefix}_k{k:02d}_le.npy'),
-                         device=device)),
                 ]
 
                 fold_curves = {}

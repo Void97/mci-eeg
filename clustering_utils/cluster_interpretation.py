@@ -815,5 +815,5 @@ def plot_masking_curves(dataset_name, task, model_name, best_iteration,
         savepath  = os.path.join(save_dir, savename)
         plt.savefig(savepath, dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"Saved masking curves [{exp_key}] cluster {c} → {savepath}")
+        print(f"Saved masking curves [{exp_key}] cluster {c} -> {savepath}")
                     
