@@ -12,6 +12,12 @@ from models.models_base.MSVTNet import MSVTNet
 
 import math
 
+MODEL_NAMES = [
+    'EEG_Conformer', 'EEG_Deformer', 'MSVTNet', 'Oh_CNN', 'SzHNN',
+    'DeepConvNet', 'EEGNet', 'ShallowConveNet', 'SCCNet', 'MBSzEEGNet',
+]
+
+
 def models_list(num_classes, num_channels, time_points):
 
     return  [
@@ -21,7 +27,8 @@ def models_list(num_classes, num_channels, time_points):
             'class': Conformer,
             'kwargs': {
                 'num_classes': num_classes,
-                'num_channels': num_channels
+                'num_channels': num_channels,
+                'time_points': time_points
             }
         },
             
@@ -116,15 +123,12 @@ def models_list(num_classes, num_channels, time_points):
         },
     ]
 
-def single_model(num_classes, num_channels, time_points):
-    return {            
-                'name': 'SCCNet',
-                'class': SCCNet,
-                'kwargs': {
-                    'num_classes': num_classes,
-                    'C': num_channels,
-                    'N': time_points,
-                    'sfreq': time_points
-                },
-            }
-    
+def single_model(num_classes, num_channels, time_points, model_name='SCCNet'):
+    available = models_list(num_classes, num_channels, time_points)
+    for entry in available:
+        if entry['name'] == model_name:
+            return entry
+    raise ValueError(
+        f"Unknown model_name '{model_name}'. "
+        f"Available: {[entry['name'] for entry in available]}"
+    )

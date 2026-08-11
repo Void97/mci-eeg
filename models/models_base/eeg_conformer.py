@@ -113,8 +113,13 @@ class TransformerEncoder(nn.Sequential):
 
 
 class ClassificationHead(nn.Sequential):
-    def __init__(self, emb_size, num_classes, tsne):
+    def __init__(self, emb_size, num_classes, tsne, time_points):
         super().__init__()
+        # fc_in is fully determined by time_points and emb_size — no num_channels dependency
+        # Conv2d(1,40,(1,25)): width → time_points - 24
+        # AvgPool2d((1,75),(1,15)): width → (time_points - 99) // 15 + 1
+        # Rearrange: flattened → T * emb_size
+        fc_in = ((time_points - 99) // 15 + 1) * emb_size
         self.cov = nn.Sequential(
             nn.Conv1d(190, 1, 1, 1),
             nn.LeakyReLU(0.2),
@@ -134,16 +139,14 @@ class ClassificationHead(nn.Sequential):
             nn.Linear(32, num_classes)
         )
         self.fc = nn.Sequential(
-            nn.Linear(1880, 16), #280 for 200Hz, 1080 for 500HZ, 440 for 256HZ
-            #nn.Linear(1880, 64), #3-class, 500 Hz
-            #nn.LazyLinear(32),
+            nn.Linear(fc_in, 16),
             nn.ELU(),
             nn.Dropout(0.3),
             nn.Linear(16, num_classes)
         )
-        
+
         self.tsne = tsne
-    
+
     def forward(self, x):
         x = x.contiguous().view(x.size(0), -1)
         if self.tsne:
@@ -152,10 +155,9 @@ class ClassificationHead(nn.Sequential):
         return out
 
 class Conformer(nn.Sequential):
-    def __init__(self, num_classes, num_channels, emb_size=40, depth=6, tsne = False, **kwargs):
+    def __init__(self, num_classes, num_channels, time_points, emb_size=40, depth=6, tsne=False, **kwargs):
         super().__init__(
-
             PatchEmbedding(num_channels, emb_size),
             TransformerEncoder(depth, emb_size),
-            ClassificationHead(emb_size, num_classes, tsne)
+            ClassificationHead(emb_size, num_classes, tsne, time_points)
         )

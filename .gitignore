@@ -23,5 +23,19 @@ venv/
 # OS
 .DS_Store
 
+### Ignore the files and directories which are not related to the benchmarking
+
 # XAI
-XAI_tools_auto/
+XAI_tools_auto/**
+
+#Clustering related
+clustering_results/**
+clustering_utils/**
+clustering_script.py
+cross_dataset_clustering.py
+plot_masking_curves.py
+run_clustering_all.sh
+run_advsftdvshc.log
+run_clustering_all.log
+run_geneeg.log
+run_mcivsHC.log

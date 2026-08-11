@@ -290,7 +290,7 @@ def build(dataset_name):
         show_channel = ch_names
         
         #tasks = ['Dementia vs Normal', 'MCI vs Normal', 'MCI vs Dementia']
-        tasks = ['Dementia vs Normal']
+        tasks = ['MCI vs Dementia']
         subjects_list, labels_list = metadata['id'], metadata['label']
 
     return dataset_path, preprocessed_dir, ch_num, ch_names, show_channel, tasks, metadata, subjects_list, labels_list

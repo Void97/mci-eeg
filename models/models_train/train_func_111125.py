@@ -95,8 +95,8 @@ def train_10_K_fold(seed, dirs, dataset_name, task, model_class, model_name, mod
             elif task == 'MCI vs Normal':
                 class1 = 'Normal' 
                 class2 = 'MCI'
-            elif task == 'Dementia vs MCI':
-                class1 = 'MCI' 
+            elif task == 'MCI vs Dementia':
+                class1 = 'MCI'
                 class2 = 'Dementia'
         
         model = model_class(**model_kwargs, tsne = True)
@@ -151,29 +151,36 @@ def train_10_K_fold(seed, dirs, dataset_name, task, model_class, model_name, mod
         print("t-SNE plot is saved!")
         
     def timing_logs():
-        
-        timing_log = {
-            "model_name": model_name,
-            "task": task,
-            "num_folds": k,
-            "num_trainable_parameters": num_params,
-            "training_time_(sec/epoch)": round(overall_avg_train_time, 2),
-            "inference_time_(sec/segment)": round(overall_avg_inference_time, 2),
-            "average_peak_gpu_memory_MB": round(average_peak_gpu_memory, 2)
-        }
-        
         timing_log_path = os.path.join(
-            dirs['training_inference_time_logs_dir'], 
+            dirs['training_inference_time_logs_dir'],
             f'{model_name}_{task}_timing_log.json'
         )
-        
+
         if os.path.exists(timing_log_path):
-            print("Timing log already exists at: {timing_log_path}.\n"
-                  "Skipping writing new training/inference times.")
+            with open(timing_log_path, 'r') as f:
+                existing_log = json.load(f)
+            existing_log.pop("inference_time_(ms/segment)", None)
+            existing_log.pop("inference_time_(sec/segment)", None)
+            if trained_this_run:
+                existing_log["training_time_(sec/epoch)"] = round(overall_avg_train_time, 2)
+            existing_log["inference_time_(sec)"] = round(overall_avg_inference_time, 4)
+            existing_log["average_peak_gpu_memory_MB"] = round(average_peak_gpu_memory, 2)
+            with open(timing_log_path, 'w') as f:
+                json.dump(existing_log, f, indent=2)
+            print(f"Timing log updated (inference time) at: {timing_log_path}")
         else:
+            timing_log = {
+                "model_name": model_name,
+                "task": task,
+                "num_folds": k,
+                "num_trainable_parameters": num_params,
+                "training_time_(sec/epoch)": round(overall_avg_train_time, 2) if trained_this_run else None,
+                "inference_time_(sec)": round(overall_avg_inference_time, 4),
+                "average_peak_gpu_memory_MB": round(average_peak_gpu_memory, 2)
+            }
             with open(timing_log_path, 'w') as f:
                 json.dump(timing_log, f, indent=2)
-            print(f"n\Timing log saved to: {timing_log_path}")
+            print(f"Timing log saved to: {timing_log_path}")
             
     set_seed(seed)
     for subject,label in zip(groups, targets):
@@ -182,6 +189,7 @@ def train_10_K_fold(seed, dirs, dataset_name, task, model_class, model_name, mod
     all_avg_train_times = []
     all_avg_inference_times = []
     all_peak_memory = []
+    trained_this_run = False
     
     all_seg_acc = [] 
     all_sub_acc = [] 
@@ -240,7 +248,6 @@ def train_10_K_fold(seed, dirs, dataset_name, task, model_class, model_name, mod
         test_loader = DataLoader(test_subset, batch_size=128,
                                     shuffle=False, drop_last=False,
                                     num_workers=0, pin_memory=False)
-        
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print("cuda available:", torch.cuda.is_available()) 
         print("device count:", torch.cuda.device_count()) 
@@ -260,13 +267,22 @@ def train_10_K_fold(seed, dirs, dataset_name, task, model_class, model_name, mod
         if torch.cuda.is_available(): 
             torch.cuda.reset_peak_memory_stats(device)
         
-        if os.path.exists(best_model_file_path): 
-            print(f"Found existing weights for {dataset_name} {task} {model_name} iteration {iter} fold {fold+1}.\n" "Skipping the training and validation parts") 
-            best_model_state = torch.load(best_model_file_path, map_location=device) 
+        if os.path.exists(best_model_file_path):
+            print(f"Found existing weights for {dataset_name} {task} {model_name} iteration {iter} fold {fold+1}.\n"
+                  "Skipping the training and validation parts")
+            best_model_state = torch.load(best_model_file_path, map_location=device)
+            if model_name == 'EEG_Conformer':
+                ckpt_ch = best_model_state['0.shallownet.1.weight'].shape[2]
+                expected_ch = model_kwargs['num_channels']
+                assert ckpt_ch == expected_ch, (
+                    f"Checkpoint has spatial kernel ch={ckpt_ch} but dataset has {expected_ch} channels. "
+                    f"Delete this checkpoint and retrain."
+                )
             #model.load_state_dict(best_model_state) 
             av_epoch_train_time = 0.0 
             all_avg_train_times.append(av_epoch_train_time)
         else:
+            trained_this_run = True
             if model_name == "MBSzEEGNet":
                 optimizer = SGD(model.parameters(),
                                 lr=best_params['learning rate'],
@@ -361,28 +377,32 @@ def train_10_K_fold(seed, dirs, dataset_name, task, model_class, model_name, mod
         tsne()
             
             #Test with the best weights
-        gradient_list = [] 
+        gradient_list = []
         gradient_batches = []
-        saliency_inst = Saliency(captum_forward_fn(model)) 
-        model.load_state_dict(best_model_state) 
-            
-        metrics_device = device 
-        if model_name == 'SzHNN': 
-            metrics_device = torch.device('cpu') 
-        model.to(metrics_device) 
+        saliency_inst = Saliency(captum_forward_fn(model))
+        model.load_state_dict(best_model_state)
+        model.eval()
+        # Explicit eval() here matters most for the "reuse existing checkpoint" branch above:
+        # that branch never calls model.train()/model.eval() itself, so without this line the
+        # model stays in the default training-mode state from instantiation (BatchNorm uses
+        # per-batch stats, Dropout stays active) for the entire test pass below.
+
+        metrics_device = device
+        if model_name == 'SzHNN':
+            metrics_device = torch.device('cpu')
+        model.to(metrics_device)
         
-        test_preds_fold, test_labels_fold, test_roc = [], [], [] 
-        inference_times = []
+        test_preds_fold, test_labels_fold, test_roc = [], [], []
         with torch.no_grad():
+            if metrics_device.type == 'cuda':
+                torch.cuda.synchronize()
             start_time = time.perf_counter()
             for xb, yb in test_loader:
-                
-                xb.requires_grad = False
-                xb, yb = xb.to(metrics_device), yb.to(metrics_device) 
-                out = model(xb)                     
+                xb, yb = xb.to(metrics_device), yb.to(metrics_device)
+                out = model(xb)
                 if model_name == 'MSVTNet':
                     test_preds = out[0].argmax(dim=1)
-                else:    
+                else:
                     test_preds = out.argmax(dim=1)
                 test_preds_fold.extend(test_preds.cpu().numpy())
                 test_labels_fold.extend(yb.cpu().numpy())
@@ -390,37 +410,37 @@ def train_10_K_fold(seed, dirs, dataset_name, task, model_class, model_name, mod
                     test_roc.extend(torch.sigmoid(out[0]).cpu().numpy())
                 else:
                     test_roc.extend(torch.sigmoid(out).cpu().numpy())
-                
-                xb.requires_grad = True
-                target = yb.detach().cpu().long().tolist()
-                gradient_batches.append(
-                    saliency_inst.attribute(
-                        xb,
-                        target=target,
-                        abs=False,
-                    ).detach().cpu().numpy())
-            
-            end_time = time.perf_counter() 
-            inference_times.append((end_time - start_time) / xb.size(0))
-            #print(f"Average inference time per segment for Fold {fold+1}: {avg_inference_time:.5f} seconds")
-            
-            gradient_list = np.concatenate(gradient_batches)
-            if gradient_list.shape[1] == 1:
-                gradient_list = np.squeeze(gradient_list, axis=1)
-            
-            saliency_maps = {class_id: [] for class_id in np.unique(test_labels_fold)}
-            for class_id in np.unique(test_labels_fold):
-                correct_indices = np.where((np.array(test_labels_fold) == class_id) &
-                                        (np.array(test_preds_fold) == class_id))[0]
-                if correct_indices.size > 0:
-                    saliency_maps[class_id].append(gradient_list[correct_indices])
-            for i in saliency_maps:
-                saliency_maps[i] = np.concatenate(saliency_maps[i]) if saliency_maps[i] else np.array([])
-        
-        
-        avg_inference_time = sum(inference_times) / len(inference_times)
+            if metrics_device.type == 'cuda':
+                torch.cuda.synchronize()
+            end_time = time.perf_counter()
+        avg_inference_time = end_time - start_time
+
+        for xb, yb in test_loader:
+            xb, yb = xb.to(metrics_device), yb.to(metrics_device)
+            xb.requires_grad = True
+            target = yb.detach().cpu().long().tolist()
+            gradient_batches.append(
+                saliency_inst.attribute(
+                    xb,
+                    target=target,
+                    abs=False,
+                ).detach().cpu().numpy())
+
+        gradient_list = np.concatenate(gradient_batches)
+        if gradient_list.shape[1] == 1:
+            gradient_list = np.squeeze(gradient_list, axis=1)
+
+        saliency_maps = {class_id: [] for class_id in np.unique(test_labels_fold)}
+        for class_id in np.unique(test_labels_fold):
+            correct_indices = np.where((np.array(test_labels_fold) == class_id) &
+                                    (np.array(test_preds_fold) == class_id))[0]
+            if correct_indices.size > 0:
+                saliency_maps[class_id].append(gradient_list[correct_indices])
+        for i in saliency_maps:
+            saliency_maps[i] = np.concatenate(saliency_maps[i]) if saliency_maps[i] else np.array([])
+
         all_avg_inference_times.append(avg_inference_time)
-        print(f"Average inference time per segment for Fold {fold+1}: {avg_inference_time:.5f} seconds")
+        print(f"Inference time for Fold {fold+1}: {avg_inference_time:.4f} sec")
 
         seg_acc = accuracy_score(test_labels_fold, test_preds_fold) 
         sub_acc, sub_sens, sub_spec, sub_prec, sub_f1 = subject_wise_metrics(test_labels_fold, test_preds_fold, test_groups) 
@@ -458,7 +478,7 @@ def train_10_K_fold(seed, dirs, dataset_name, task, model_class, model_name, mod
     average_peak_gpu_memory = sum(all_peak_memory) / len(all_peak_memory)
     print(f"\n=== Overall Averages Across {k} Folds ===")
     print(f"Average training time per epoch: {overall_avg_train_time:.2f} seconds")
-    print(f"Average inference time per segment: {overall_avg_inference_time:.5f} seconds")
+    print(f"Average inference time: {overall_avg_inference_time:.4f} sec")
     print(f"Average peak GPU memory: {average_peak_gpu_memory} MB")
     timing_logs()
     
