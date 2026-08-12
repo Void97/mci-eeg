@@ -39,3 +39,7 @@ run_advsftdvshc.log
 run_clustering_all.log
 run_geneeg.log
 run_mcivsHC.log
+clustering_script.py
+clustering_utils/
+cross_dataset_clustering.py
+run_clustering_all.sh
