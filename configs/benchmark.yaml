@@ -1,0 +1,23 @@
+# Default configuration for the benchmarking pipeline (main.py).
+#
+# Values that identify *what* to run (dataset, model) are passed as CLI
+# arguments instead of living here — see `python main.py --help`.
+# Everything below is settings that stay the same across most runs.
+
+sfreq: 200
+freq_bands: [all, delta, theta, alpha, beta, gamma]
+need_preprocessing: false
+
+# k-fold cross-validation settings
+k_folds: 5
+n_repeats: 10
+
+# Label baked into the saved overall-metrics filename (originally a hardcoded
+# string describing the epoching window/overlap used upstream).
+run_label: "4s, 0.5 overlaps"
+
+# Grid searched during the pilot hyperparameter search (train_10_K_fold_pilot).
+hyperparam_grid:
+  batch_sizes: [16, 32, 64]
+  learning_rates: [0.001, 0.005, 0.0001, 0.0005, 0.00001]
+  l2_weight_decays: [0, 0.01, 0.001, 0.0001]

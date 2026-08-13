@@ -16,27 +16,32 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     
-def generate_seeds(n_repeats, dataset_name, task):
+def generate_seeds(mode, n_repeats, dataset_name, task):
     
-    seeds_file = f"./results/seeds_{dataset_name}_{task}.txt"
-    if os.path.exists(seeds_file):
-        print("The random seeds already exist!\n"
-              f"{seeds_file} is used")
-        with open(seeds_file, "r") as f:
-            random_seeds = [int(line.strip()) for line in f.readlines()]
-    else:
-        random_seeds = []
-        for _ in range(n_repeats):
-            seed = random.randint(0, 2**32-1)
-            random_seeds.append(seed)
-        
-        os.makedirs(os.path.dirname(seeds_file), exist_ok=True)
-        with open(seeds_file, "w") as f:
-            for seed in random_seeds:
-                f.write(str(seed) + "\n")
-        print(f"Seeds are generated and saved to {seeds_file}")
-        
-    return random_seeds
+    if mode == 'clustering':
+        random_seeds = [42, 123, 2024, 5678, 91011]
+        print(f"Using fixed random seeds for clustering: {random_seeds}")
+        return random_seeds
+    elif mode == 'benchmark':
+        seeds_file = f"./results/seeds_{dataset_name}_{task}.txt"
+        if os.path.exists(seeds_file):
+            print("The random seeds already exist!\n"
+                f"{seeds_file} is used")
+            with open(seeds_file, "r") as f:
+                random_seeds = [int(line.strip()) for line in f.readlines()]
+        else:
+            random_seeds = []
+            for _ in range(n_repeats):
+                seed = random.randint(0, 2**32-1)
+                random_seeds.append(seed)
+            
+            os.makedirs(os.path.dirname(seeds_file), exist_ok=True)
+            with open(seeds_file, "w") as f:
+                for seed in random_seeds:
+                    f.write(str(seed) + "\n")
+            print(f"Seeds are generated and saved to {seeds_file}")
+            
+        return random_seeds
 
 def labels_mapping(dataset_name, task):
     
@@ -141,12 +146,13 @@ def subject_wise_metrics(labels, preds, subjects):
     # Confusion matrix at subject level
     tn, fp, fn, tp = confusion_matrix(subj_true, subj_pred).ravel()
 
+    acc = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
     sens = tp / (tp + fn) if (tp + fn) > 0 else 0
     spec = tn / (tn + fp) if (tn + fp) > 0 else 0
     prec = tp / (tp + fp) if (tp + fp) > 0 else 0
     f1 = 2 * prec * sens / (prec + sens) if (prec + sens) > 0 else 0
 
-    return sens, spec, prec, f1    
+    return acc, sens, spec, prec, f1    
 
 def av_metrics(acc_all, subject_acc_all, prec_all, subject_prec_all, sens_all, subject_sens_all, spec_all, subject_spec_all, f1_all, subject_f1_all):
     
@@ -179,24 +185,41 @@ def std_metrics(acc_all, subject_acc_all, prec_all, subject_prec_all, sens_all, 
     
     return acc_std, subject_acc_std, prec_std, subject_prec_std, sens_std, subject_sens_std, spec_std, subject_spec_std, f1_std, subject_f1_std
 
+def save_iter_metrics(acc, subject_acc, subject_sens, subject_spec, subject_prec, subject_f1, #### 11132025 The order is fixed.
+                          dataset, task, model_name, iter, dir):
+        
+        metrics_logs = {
+            "Task": task,
+            "Model": model_name,
+            "Accuracy (seg.)": acc,
+            "Accuracy (subj.)": subject_acc,
+            "Sensitivity (subj.)": subject_sens,
+            "Specificity (subj.)": subject_spec,
+            "Precision (subj.)": subject_prec,
+            "F1 Score (subj.)": subject_f1,
+        } 
+        
+        if not os.path.exists(dir):
+            os.makedirs(dir)
+        metrics_logs_file = os.path.join(dir, f"{dataset}_{task}_{model_name}_iteration_{iter}_metrics.json")
+        with open(metrics_logs_file, 'w') as f:
+            json.dump(metrics_logs, f, indent=2)
+        print(f"Metrics of {model_name} of the iteration {iter} were saved!")
+
 def save_metrics_logs(dir, dataset, task, model_name,
                       acc_av, acc_std, subject_acc_av, subject_acc_std,
-                      prec_av, prec_std, subject_prec_av, subject_prec_std,
-                      sens_av, sens_std, subject_sens_av, subject_sens_std,
-                      spec_av, f1_av, subject_spec_av, subject_spec_std, 
-                      spec_std, f1_std, subject_f1_av, subject_f1_std):
+                      subject_sens_av, subject_sens_std,
+                      subject_spec_av, subject_spec_std, 
+                      subject_prec_av, subject_prec_std,
+                      subject_f1_av, subject_f1_std):
     
     metrics_logs = {
     "Overall_accuracy (seg.)": f'{acc_av} ± {acc_std}',
     "Overall_accuracy (subj.)": f'{subject_acc_av} ± {subject_acc_std}',
-    "Overall_precision (seg.)": f'{prec_av} ± {prec_std}',
-    "Overall_precision (subj.)": f'{subject_prec_av} ± {subject_prec_std}',
-    "Overall_sensitivity (seg.)": f'{sens_av} ± {sens_std}',
-    "Overall_sensitivity (subj.)": f'{subject_sens_av} ± {subject_sens_std}',
-    "Overall_specificity (seg.)": f'{spec_av} ± {spec_std}',
-    "Overall_specificity (subj.)": f'{subject_spec_av} ± {subject_spec_std}',
-    "Overall_f1 (seg.)": f'{f1_av} ± {f1_std}',
-    "Overall_f1 (subj.)": f'{subject_f1_av} ± {subject_f1_std}'
+    "Overall_sensitivity": f'{subject_sens_av} ± {subject_sens_std}',
+    "Overall_specificity": f'{subject_spec_av} ± {subject_spec_std}',
+    "Overall_precision": f'{subject_prec_av} ± {subject_prec_std}',
+    "Overall_f1": f'{subject_f1_av} ± {subject_f1_std}'
     }
     
     if not os.path.exists(dir):
@@ -246,14 +269,13 @@ def build(dataset_name):
                     'C4', 'T4', 'T5', 'P3', 'Pz', 'P4', 'T6', 'O1', 'O2']
         show_channel = ch_names
         
-        #tasks = ['AD vs HC', 'FTD vs HC', 'FTD vs AD']
         tasks = ['AD vs HC', 'FTD vs HC', 'FTD vs AD']
         subjects_list, labels_list = metadata['participant_id'], metadata['Group']
         
     elif dataset_name == 'CAUEEG':
         annotation_path = './datasets/raw/CAUEEG/dementia-no-overlap.json'
         #dataset_path = './datasets/raw/CAUEEG/signal/edf/'
-        dataset_path = './datasets/raw/CAUEEG/filtered_signal/'
+        dataset_path = './datasets/raw/CAUEEG/signal/edf/'
         preprocessed_dir = './datasets/preprocessed/CAUEEG-preprocessed/'
         
         with open(annotation_path, 'r') as file:
@@ -289,8 +311,9 @@ def build(dataset_name):
                     'F7', 'T3', 'T5', 'F8', 'T4', 'T6', 'Fz', 'Cz', 'Pz']
         show_channel = ch_names
         
-        #tasks = ['Dementia vs Normal', 'MCI vs Normal', 'MCI vs Dementia']
-        tasks = ['MCI vs Dementia']
+        tasks = ['Dementia vs Normal', 'MCI vs Normal', 'MCI vs Dementia']
+        #tasks = ['MCI vs Normal']
+        #tasks = ['Dementia vs Normal', 'MCI vs Normal']
         subjects_list, labels_list = metadata['id'], metadata['label']
 
     return dataset_path, preprocessed_dir, ch_num, ch_names, show_channel, tasks, metadata, subjects_list, labels_list
