@@ -43,6 +43,9 @@ results/tsne plots/*
 results/weights/*
 !results/weights/.gitkeep
 
+# Docs
+docs/
+
 # Python
 __pycache__/
 *.py[cod]
