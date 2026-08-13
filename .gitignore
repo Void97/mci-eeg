@@ -1,10 +1,47 @@
 # Data
-
-datasets/
+datasets/*
+!datasets/raw/
+!datasets/preprocessed/
+datasets/raw/*
+!datasets/raw/.gitkeep
+datasets/preprocessed/*
+!datasets/preprocessed/.gitkeep
 
 # Results
 results/**
 !results/**/*.txt
+
+!results/best params logs/
+results/best params logs/*
+!results/best params logs/.gitkeep
+
+!results/k-fold dist logs/
+results/k-fold dist logs/*
+!results/k-fold dist logs/.gitkeep
+
+!results/metrics/
+results/metrics/*
+!results/metrics/.gitkeep
+
+!results/predictions/
+results/predictions/*
+!results/predictions/.gitkeep
+
+!results/topomaps/
+results/topomaps/*
+!results/topomaps/.gitkeep
+
+!results/training and inference time logs/
+results/training and inference time logs/*
+!results/training and inference time logs/.gitkeep
+
+!results/tsne plots/
+results/tsne plots/*
+!results/tsne plots/.gitkeep
+
+!results/weights/
+results/weights/*
+!results/weights/.gitkeep
 
 # Python
 __pycache__/
@@ -43,5 +80,3 @@ clustering_script.py
 clustering_utils/
 cross_dataset_clustering.py
 run_clustering_all.sh
-!results/best params logs/
-!results/best params logs/**

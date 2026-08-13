@@ -1,8 +1,0 @@
-{
-  "val_loss": 3.5730429472246072,
-  "val_acc": 0.7000524375289008,
-  "model": "EEGNet",
-  "batch size": 32,
-  "learning rate": 0.001,
-  "L2 weight decay": 0
-}
