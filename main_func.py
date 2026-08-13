@@ -8,6 +8,8 @@ import os
 from collections import Counter
 from sklearn.metrics import confusion_matrix
 
+from utils.dataset_registry import DATASETS
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -44,33 +46,7 @@ def generate_seeds(mode, n_repeats, dataset_name, task):
         return random_seeds
 
 def labels_mapping(dataset_name, task):
-    
-    if dataset_name == 'GENEEG':
-        labels_map = {'Normal': 0, 'MCI': 1}
-    elif dataset_name == 'MCIvsHC':
-        labels_map = {'NORMAL': 0, 'MCI': 1}
-    
-    if dataset_name == 'CAUEEG':
-        if task == 'Dementia vs Normal':
-            labels_map = {'Normal': 0, 'Dementia': 1}
-        elif task == 'MCI vs Normal':
-            labels_map = {'Normal': 0, 'MCI': 1}
-        elif task == 'MCI vs Dementia':
-            labels_map = {'MCI': 0, 'Dementia': 1}
-        elif task == '3-class':
-            labels_map = {'Normal': 0, 'MCI': 1, 'Dementia': 2}
-    
-    elif dataset_name == 'ADvsFTDvsHC':
-        if task == 'AD vs HC':
-            labels_map = {'C': 0, 'A': 1}
-        elif task == 'FTD vs HC':
-            labels_map = {'C': 0, 'F': 1}
-        elif task == 'FTD vs AD':
-            labels_map = {'F': 0, 'A': 1}
-        elif task == '3-class':
-            labels_map = {'C': 0, 'F': 1, 'A': 2}
-    
-    return labels_map    
+    return DATASETS[dataset_name].label_maps[task]
 
 def filter_data(subjects, labels, labels_map):
     
@@ -230,93 +206,12 @@ def save_metrics_logs(dir, dataset, task, model_name,
     print(f"Overall metrics of {model_name} were saved!")
 
 def build(dataset_name):
-    
-    if dataset_name == 'GENEEG':
-        dataset_path = './datasets/raw/GENEEG/all_data'
-        preprocessed_dir = './datasets/preprocessed/GENEEG_preprocessed'
-        metadata = pd.read_excel(os.path.join(dataset_path, 'metadata.xlsx'))
-        
-        ch_num = 17
-        ch_names = ['Fp1', 'Fp2', 'F3', 'F4', 'F7', 'F8', 'C3', 'C4', 'P3', 'P4', 
-            'O1', 'O2', 'T3', 'T4', 'Fz', 'Cz', 'Pz']
-        show_channel = ch_names
-        
-        tasks = ['MCI vs HC']
-        subjects_list, labels_list = metadata['id'], metadata['status']
-    
-    elif dataset_name == 'MCIvsHC':
-        annotation_path = './datasets/raw/MCIvsHC/data_extended/states_2.xlsx'
-        dataset_path = './datasets/raw/MCIvsHC/data_extended/'
-        preprocessed_dir = './datasets/raw/MCIvsHC_preprocessed'
-        metadata = pd.read_excel(os.path.join(annotation_path))
-        
-        ch_num = 19
-        ch_names = ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 'T3', 'C3', 'Cz', 
-                    'C4', 'T4', 'T5', 'P3', 'Pz', 'P4', 'T6', 'O1', 'O2']
-        show_channel = ch_names
-        
-        tasks = ['MCI vs HC']
-        subjects_list, labels_list = metadata['file number'], metadata['status']
-        
-    elif dataset_name == 'ADvsFTDvsHC':
-        annotation_path = 'datasets/raw/ADvsFTDvsHC/data/dataset_description.json'
-        dataset_path = 'datasets/raw/ADvsFTDvsHC/data/'
-        preprocessed_dir = 'datasets/preprocessed/ADvsFTDvsHC_preprocessed/'
-        metadata = pd.read_csv(os.path.join(dataset_path, 'participants.tsv') ,sep = '\t')
-        
-        ch_num = 19
-        ch_names = ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 'T3', 'C3', 'Cz', 
-                    'C4', 'T4', 'T5', 'P3', 'Pz', 'P4', 'T6', 'O1', 'O2']
-        show_channel = ch_names
-        
-        tasks = ['AD vs HC', 'FTD vs HC', 'FTD vs AD']
-        subjects_list, labels_list = metadata['participant_id'], metadata['Group']
-        
-    elif dataset_name == 'CAUEEG':
-        annotation_path = './datasets/raw/CAUEEG/dementia-no-overlap.json'
-        #dataset_path = './datasets/raw/CAUEEG/signal/edf/'
-        dataset_path = './datasets/raw/CAUEEG/signal/edf/'
-        preprocessed_dir = './datasets/preprocessed/CAUEEG-preprocessed/'
-        
-        with open(annotation_path, 'r') as file:
-            annotation = json.load(file)
-        subjects_list = []
-        labels_list = []
-        for entry in annotation['train_split']:
-            if 'normal' in entry["symptom"]:
-                subjects_list.append(entry['serial'])
-                labels_list.append('Normal')
-            elif 'mci' in entry['symptom']:
-                subjects_list.append(entry['serial'])
-                labels_list.append('MCI')
-            elif 'dementia' in entry['symptom']:
-                subjects_list.append(entry['serial'])
-                labels_list.append('Dementia')
-        for entry in annotation['test_split']:
-            if 'normal' in entry["symptom"]:
-                subjects_list.append(entry['serial'])
-                labels_list.append('Normal')
-            elif 'mci' in entry['symptom']:
-                subjects_list.append(entry['serial'])
-                labels_list.append('MCI')
-            elif 'dementia' in entry['symptom']:
-                subjects_list.append(entry['serial'])
-                labels_list.append('Dementia')
+    spec = DATASETS[dataset_name]
+    metadata, subjects_list, labels_list = spec.load_metadata()
 
-        table = list(zip(subjects_list, labels_list))
-        metadata = pd.DataFrame(table, columns=['id', 'label'])
-        print(metadata)
-        ch_num = 19
-        ch_names = ['Fp1', 'F3', 'C3', 'P3', 'O1', 'Fp2', 'F4', 'C4', 'P4', 'O2', 
-                    'F7', 'T3', 'T5', 'F8', 'T4', 'T6', 'Fz', 'Cz', 'Pz']
-        show_channel = ch_names
-        
-        tasks = ['Dementia vs Normal', 'MCI vs Normal', 'MCI vs Dementia']
-        #tasks = ['MCI vs Normal']
-        #tasks = ['Dementia vs Normal', 'MCI vs Normal']
-        subjects_list, labels_list = metadata['id'], metadata['label']
-
-    return dataset_path, preprocessed_dir, ch_num, ch_names, show_channel, tasks, metadata, subjects_list, labels_list
+    return (spec.dataset_path, spec.preprocessed_dir, spec.ch_num,
+            spec.ch_names, spec.ch_names, spec.tasks,
+            metadata, subjects_list, labels_list)
 
 def makedirs(dataset_name):
     

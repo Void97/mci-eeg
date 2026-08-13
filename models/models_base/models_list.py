@@ -1,3 +1,6 @@
+from dataclasses import dataclass, field
+from typing import Any
+
 from models.models_base.Oh_CNN import Oh_CNN
 from models.models_base.EEGNet import EEGnet
 from models.models_base.ShallowConvNet import ShawllowConvNet
@@ -18,117 +21,127 @@ MODEL_NAMES = [
 ]
 
 
-def models_list(num_classes, num_channels, time_points):
+@dataclass
+class ModelSpec:
+    """One entry in the model registry: a name, the class to instantiate,
+    and the constructor kwargs to instantiate it with."""
+    name: str
+    cls: type
+    kwargs: dict[str, Any] = field(default_factory=dict)
 
-    return  [
 
-        {
-            'name': 'EEG_Conformer',
-            'class': Conformer,
-            'kwargs': {
+def models_list(num_classes, num_channels, time_points) -> list[ModelSpec]:
+
+    return [
+
+        ModelSpec(
+            name='EEG_Conformer',
+            cls=Conformer,
+            kwargs={
                 'num_classes': num_classes,
                 'num_channels': num_channels,
-                'time_points': time_points
-            }
-        },
-            
-        {    
-            'name': 'EEG_Deformer',
-            'class': Deformer, 
-            'kwargs': {
+                'time_points': time_points,
+            },
+        ),
+
+        ModelSpec(
+            name='EEG_Deformer',
+            cls=Deformer,
+            kwargs={
                 'num_chan': num_channels,
                 'num_time': time_points,
-                'num_classes': num_classes
+                'num_classes': num_classes,
             },
-        },
-        
-        {
-            'name': 'MSVTNet',
-            'class': MSVTNet,
-            'kwargs': {
+        ),
+
+        ModelSpec(
+            name='MSVTNet',
+            cls=MSVTNet,
+            kwargs={
                 'num_ch': num_channels,
                 'nTime': time_points,
                 'num_classes': num_classes,
             },
-        },
-        
-        {
-            'name': 'Oh_CNN',
-            'class': Oh_CNN,
-            'kwargs': {
+        ),
+
+        ModelSpec(
+            name='Oh_CNN',
+            cls=Oh_CNN,
+            kwargs={
                 'num_classes': num_classes,
                 'num_channels': num_channels,
                 'time_points': time_points,
-            }
-        },
+            },
+        ),
 
-        {
-            'name': 'SzHNN',
-            'class': SzHNN,
-            'kwargs': {
+        ModelSpec(
+            name='SzHNN',
+            cls=SzHNN,
+            kwargs={
                 'num_classes': num_classes,
                 'num_channels': num_channels,
-            }
-        },
+            },
+        ),
 
-        {
-            'name': 'DeepConvNet',
-            'class': DeepConvNet,
-            'kwargs': {
-                'num_classes': num_classes,
-                'num_channels': num_channels,
-                'time_points': time_points,
-            }
-        },
-
-        {
-            'name': 'EEGNet',
-            'class': EEGnet,
-            'kwargs': {
+        ModelSpec(
+            name='DeepConvNet',
+            cls=DeepConvNet,
+            kwargs={
                 'num_classes': num_classes,
                 'num_channels': num_channels,
                 'time_points': time_points,
-                'half_sfreq': math.floor(200/2)
-            }
-        },
+            },
+        ),
 
-        {
-            'name': 'ShallowConveNet',
-            'class': ShawllowConvNet,
-            'kwargs': {
+        ModelSpec(
+            name='EEGNet',
+            cls=EEGnet,
+            kwargs={
+                'num_classes': num_classes,
+                'num_channels': num_channels,
+                'time_points': time_points,
+                'half_sfreq': math.floor(200 / 2),
+            },
+        ),
+
+        ModelSpec(
+            name='ShallowConveNet',
+            cls=ShawllowConvNet,
+            kwargs={
                 'num_classes': num_classes,
                 'C': num_channels,
                 'N': time_points,
-            }
-        },
+            },
+        ),
 
-        {
-            'name': 'SCCNet',
-            'class': SCCNet,
-            'kwargs': {
+        ModelSpec(
+            name='SCCNet',
+            cls=SCCNet,
+            kwargs={
                 'num_classes': num_classes,
                 'C': num_channels,
                 'N': time_points,
                 'sfreq': time_points,
-            }
-        },
+            },
+        ),
 
-        {
-            'name': 'MBSzEEGNet',
-            'class': MBSzEEGNet,
-            'kwargs': {
+        ModelSpec(
+            name='MBSzEEGNet',
+            cls=MBSzEEGNet,
+            kwargs={
                 'channels': num_channels,
                 'samples': time_points,
-            }
-        },
+            },
+        ),
     ]
 
-def single_model(num_classes, num_channels, time_points, model_name='SCCNet'):
+
+def single_model(num_classes, num_channels, time_points, model_name='SCCNet') -> ModelSpec:
     available = models_list(num_classes, num_channels, time_points)
     for entry in available:
-        if entry['name'] == model_name:
+        if entry.name == model_name:
             return entry
     raise ValueError(
         f"Unknown model_name '{model_name}'. "
-        f"Available: {[entry['name'] for entry in available]}"
+        f"Available: {[entry.name for entry in available]}"
     )

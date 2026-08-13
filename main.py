@@ -107,10 +107,10 @@ def main(args, cfg):
                 print(f"Iteration {i+1}")
                 seed = random_seeds[i]
                 print(f"Random seed: {seed}")
-                metrics_exist_file = os.path.join(dirs['metrics_logs_dir'], f"{dataset_name}_{task}_{model['name']}_iteration_{i}_metrics.json")
+                metrics_exist_file = os.path.join(dirs['metrics_logs_dir'], f"{dataset_name}_{task}_{model.name}_iteration_{i}_metrics.json")
                 if os.path.exists(metrics_exist_file):
 
-                    print(f"{dataset_name}_{task}_{model['name']}_iteration_{i+1} metrics exist! No need to train.")
+                    print(f"{dataset_name}_{task}_{model.name}_iteration_{i+1} metrics exist! No need to train.")
                     with open(metrics_exist_file, 'r') as f:
                         metrics = json.load(f)
 
@@ -130,14 +130,14 @@ def main(args, cfg):
                     f1_all.append(sub_f1)
 
                 else:
-                    print(f"{dataset_name}_{task}_{model['name']}_iteration_{i+1} metrics doesn't exist. Let's train!")
+                    print(f"{dataset_name}_{task}_{model.name}_iteration_{i+1} metrics doesn't exist. Let's train!")
 
-                    if model['name'] == 'Oh_CNN' or model['name'] == 'SzHNN' or model['name'] == 'EEG_Deformer':
+                    if model.name == 'Oh_CNN' or model.name == 'SzHNN' or model.name == 'EEG_Deformer':
                         full_samples = torch.from_numpy(samples).float()
                     else:
                         full_samples = torch.from_numpy(samples).unsqueeze(1).float()   # one big tensor
 
-                    kwargs = model['kwargs'].copy()
+                    kwargs = model.kwargs.copy()
                     kwargs['num_classes'] = 3 if task == '3-class' else 2
 
                     full_targets = torch.from_numpy(targets).float()    # one big tensor
@@ -145,22 +145,22 @@ def main(args, cfg):
 
                     ###############################################################################################################################
 
-                    params_file_path = os.path.join(dirs['best_params_logs_dir'], f"{dataset_name}_{task}_{model['name']}_iteration_{i}_best_params_file.json")
+                    params_file_path = os.path.join(dirs['best_params_logs_dir'], f"{dataset_name}_{task}_{model.name}_iteration_{i}_best_params_file.json")
 
                     if os.path.exists(params_file_path):
-                        print(f"Best parameters file for the iteration {i+1} of {task} and {model['name']} exists! No need the pilot training.")
-                        best_params_file = os.path.join(dirs['best_params_logs_dir'], f"{dataset_name}_{task}_{model['name']}_iteration_{i}_best_params_file.json")
+                        print(f"Best parameters file for the iteration {i+1} of {task} and {model.name} exists! No need the pilot training.")
+                        best_params_file = os.path.join(dirs['best_params_logs_dir'], f"{dataset_name}_{task}_{model.name}_iteration_{i}_best_params_file.json")
                         with open(best_params_file, 'r') as f:
                             best_params = json.load(f)
 
-                        print(f"Task: {task}. Model: {model['name']}. Iteration: {i + 1}")
+                        print(f"Task: {task}. Model: {model.name}. Iteration: {i + 1}")
                         seg_acc, sub_acc, sub_sens, sub_spec, sub_prec, sub_f1, gradient = train_10_K_fold(
                                 seed,
                                 dirs,
                                 dataset_name,
                                 task,
-                                model['class'],
-                                model['name'],
+                                model.cls,
+                                model.name,
                                 kwargs,
                                 best_params,
                                 full_dataset,
@@ -179,21 +179,21 @@ def main(args, cfg):
                         f1_all.append(sub_f1)
 
 
-                        save_iter_metrics(seg_acc, sub_acc, sub_sens, sub_spec, sub_prec, sub_f1, dataset_name, task, model['name'], i, dirs['metrics_logs_dir'])
+                        save_iter_metrics(seg_acc, sub_acc, sub_sens, sub_spec, sub_prec, sub_f1, dataset_name, task, model.name, i, dirs['metrics_logs_dir'])
 
                         xai = Interpretation(dirs['topomaps_dir'], sfreq)
-                        xai.plot_psd(dataset_name, model['name'], task, gradient, i, 40)
-                        xai.plot_psd_topo(dataset_name, model['name'], task, gradient, freq_bands, ch_names, show_channel, i)
+                        xai.plot_psd(dataset_name, model.name, task, gradient, i, 40)
+                        xai.plot_psd_topo(dataset_name, model.name, task, gradient, freq_bands, ch_names, show_channel, i)
 
 
                     else:
-                        print(f"Best parameters file for the iteration {i+1} of {task} and {model['name']} doesn't exists! Needs pilot training.")
-                        print(f"The pilot training begins. \nTask: {task}. Model: {model['name']}. Iteration: {i+1}.")
+                        print(f"Best parameters file for the iteration {i+1} of {task} and {model.name} doesn't exists! Needs pilot training.")
+                        print(f"The pilot training begins. \nTask: {task}. Model: {model.name}. Iteration: {i+1}.")
                         best_params = train_10_K_fold_pilot(
                             seed,
                             task,
-                            model['class'],
-                            model['name'],
+                            model.cls,
+                            model.name,
                             kwargs,
                             batch_sizes,
                             learning_rates,
@@ -205,20 +205,20 @@ def main(args, cfg):
                             k
                         )
 
-                        best_params_file = os.path.join(dirs['best_params_logs_dir'], f"{dataset_name}_{task}_{model['name']}_iteration_{i}_best_params_file.json")
+                        best_params_file = os.path.join(dirs['best_params_logs_dir'], f"{dataset_name}_{task}_{model.name}_iteration_{i}_best_params_file.json")
                         with open(best_params_file, 'w') as f:
                             json.dump(best_params, f, indent=2)
                         print(f'The best parameters have been saved!')
 
 
-                        print(f"Task: {task}. Model: {model['name']}. Iteration: {i + 1}")
+                        print(f"Task: {task}. Model: {model.name}. Iteration: {i + 1}")
                         seg_acc, sub_acc, sub_sens, sub_spec, sub_prec, sub_f1, gradient = train_10_K_fold(
                                 seed,
                                 dirs,
                                 dataset_name,
                                 task,
-                                model['class'],
-                                model['name'],
+                                model.cls,
+                                model.name,
                                 kwargs,
                                 best_params,
                                 full_dataset,
@@ -237,12 +237,12 @@ def main(args, cfg):
                         f1_all.append(sub_f1)
 
 
-                        save_iter_metrics(seg_acc, sub_acc, sub_sens, sub_spec, sub_prec, sub_f1, dataset_name, task, model['name'], i, dirs['metrics_logs_dir'])
+                        save_iter_metrics(seg_acc, sub_acc, sub_sens, sub_spec, sub_prec, sub_f1, dataset_name, task, model.name, i, dirs['metrics_logs_dir'])
 
 
                         xai = Interpretation(dirs['topomaps_dir'], sfreq)
-                        xai.plot_psd(dataset_name, model['name'], task, gradient, i, 40)
-                        xai.plot_psd_topo(dataset_name, model['name'], task, gradient, freq_bands, ch_names, show_channel, i)
+                        xai.plot_psd(dataset_name, model.name, task, gradient, i, 40)
+                        xai.plot_psd_topo(dataset_name, model.name, task, gradient, freq_bands, ch_names, show_channel, i)
 
 
             seg_acc_av, seg_acc_std = round(np.mean(seg_acc_all),4), round(np.std(seg_acc_all),4)
@@ -252,7 +252,7 @@ def main(args, cfg):
             prec_av, prec_std = round(np.mean(prec_all),4), round(np.std(prec_all),4)
             f1_av, f1_std = round(np.mean(f1_all),4), round(np.std(f1_all),4)
 
-            save_metrics_logs(dirs['metrics_logs_dir'], dataset_name, task, model['name'],
+            save_metrics_logs(dirs['metrics_logs_dir'], dataset_name, task, model.name,
                     seg_acc_av, seg_acc_std, acc_av, acc_std,
                     sens_av, sens_std,
                     spec_av, spec_std,
@@ -261,7 +261,7 @@ def main(args, cfg):
 
             result_subj = {
                     "Task": task,
-                    "Model": model['name'],
+                    "Model": model.name,
                     "Accuracy (seg.)": f'{seg_acc_av} ± {seg_acc_std}',
                     "Accuracy (subj.)": f'{acc_av} ± {acc_std}',
                     "Sensitivity": f'{sens_av} ± {sens_std}',
