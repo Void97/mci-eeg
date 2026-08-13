@@ -13,7 +13,7 @@ from models.models_base.MSVTNet import JointCrossEntoryLoss
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.metrics import confusion_matrix
 from models.models_train.k_fold_logging import count_fold_subjects
-from main_func_111125 import subject_wise_metrics
+from main_func import subject_wise_metrics
 
 from sklearn.manifold import TSNE
 from sklearn.preprocessing import MinMaxScaler

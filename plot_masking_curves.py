@@ -1,6 +1,6 @@
 import argparse
 
-from main_func_111125 import build, labels_mapping, filter_data
+from main_func import build, labels_mapping, filter_data
 from models.models_base.models_list import single_model, MODEL_NAMES
 from utils.EEG_preprocess import load_preprocessed
 from clustering_utils.best_iteration import find_best_iteration
