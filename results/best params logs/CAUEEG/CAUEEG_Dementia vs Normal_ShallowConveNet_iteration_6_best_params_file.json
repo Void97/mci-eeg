@@ -1,0 +1,8 @@
+{
+  "val_loss": 0.6783801534588647,
+  "val_acc": 0.7172949220062464,
+  "model": "ShallowConveNet",
+  "batch size": 64,
+  "learning rate": 0.0001,
+  "L2 weight decay": 0.0001
+}

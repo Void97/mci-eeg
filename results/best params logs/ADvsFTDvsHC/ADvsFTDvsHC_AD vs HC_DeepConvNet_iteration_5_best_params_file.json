@@ -1,0 +1,8 @@
+{
+  "val_loss": 19.959844202797356,
+  "val_acc": 0.7193702768632355,
+  "model": "DeepConvNet",
+  "batch size": 32,
+  "learning rate": 0.005,
+  "L2 weight decay": 0.0001
+}

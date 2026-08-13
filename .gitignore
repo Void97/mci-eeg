@@ -43,3 +43,5 @@ clustering_script.py
 clustering_utils/
 cross_dataset_clustering.py
 run_clustering_all.sh
+!results/best params logs/
+!results/best params logs/**

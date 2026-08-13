@@ -1,0 +1,8 @@
+{
+  "val_loss": 2.0228985869700358,
+  "val_acc": 0.7334576279559256,
+  "model": "EEG_Deformer",
+  "batch size": 32,
+  "learning rate": 0.001,
+  "L2 weight decay": 0.0001
+}

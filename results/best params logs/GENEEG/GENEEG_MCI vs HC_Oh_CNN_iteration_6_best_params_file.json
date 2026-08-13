@@ -1,0 +1,8 @@
+{
+  "val_loss": 0.842177564006025,
+  "val_acc": 0.643704621923145,
+  "model": "Oh_CNN",
+  "batch size": 16,
+  "learning rate": 0.005,
+  "L2 weight decay": 0.0001
+}

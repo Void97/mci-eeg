@@ -1,0 +1,8 @@
+{
+  "val_loss": 2.770579259692175,
+  "val_acc": 0.7646551312374308,
+  "model": "EEG_Conformer",
+  "batch size": 16,
+  "learning rate": 0.0005,
+  "L2 weight decay": 0.01
+}

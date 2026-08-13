@@ -1,0 +1,8 @@
+{
+  "val_loss": 1.0517716140527935,
+  "val_acc": 0.6768999088478799,
+  "model": "MBSzEEGNet",
+  "batch size": 32,
+  "learning rate": 0.001,
+  "L2 weight decay": 0.0001
+}

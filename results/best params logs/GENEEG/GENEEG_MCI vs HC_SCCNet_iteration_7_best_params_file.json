@@ -1,0 +1,8 @@
+{
+  "val_loss": 0.8682799639165454,
+  "val_acc": 0.6672569505932353,
+  "model": "SCCNet",
+  "batch size": 32,
+  "learning rate": 0.0005,
+  "L2 weight decay": 0.01
+}

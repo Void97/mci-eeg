@@ -1,0 +1,8 @@
+{
+  "val_loss": 0.6843579625702984,
+  "val_acc": 0.5951512048514166,
+  "model": "SzHNN",
+  "batch size": 16,
+  "learning rate": 0.001,
+  "L2 weight decay": 0
+}

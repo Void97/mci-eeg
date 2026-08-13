@@ -1,0 +1,8 @@
+{
+  "val_loss": 3.494260521889341,
+  "val_acc": 0.7524184993757496,
+  "model": "MSVTNet",
+  "batch size": 16,
+  "learning rate": 0.0005,
+  "L2 weight decay": 0.01
+}
