@@ -21,3 +21,16 @@ hyperparam_grid:
   batch_sizes: [16, 32, 64]
   learning_rates: [0.001, 0.005, 0.0001, 0.0005, 0.00001]
   l2_weight_decays: [0, 0.01, 0.001, 0.0001]
+
+# Training-loop settings, passed straight through as a dict to
+# train_10_K_fold/train_10_K_fold_pilot -- previously hardcoded literals
+# scattered through train_func.py.
+training:
+  patience: 30                # early-stopping patience, full training
+  full_train_max_epochs: 100
+  pilot_max_epochs: 30
+  val_batch_size: 64
+  test_batch_size: 128
+  subsample_fraction: 0.1     # fraction of each subject's segments kept per fold during the pilot search
+  tsne_n_iter: 3000
+  tsne_random_state: 42

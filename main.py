@@ -7,10 +7,12 @@ import pandas as pd
 import torch
 import random
 import yaml
+from dataclasses import replace
 
 from utils.EEG_preprocess import preprocess, load_preprocessed
 from models.models_base.models_list import models_list, single_model, MODEL_NAMES
-from models.models_train.train_func import train_10_K_fold, train_10_K_fold_pilot
+from models.models_train.train_func import train, train_pilot
+from models.models_train.training_loop import RunContext, FoldData
 from captum.attr import Saliency
 from collections import Counter
 from torch.utils.data import TensorDataset
@@ -55,10 +57,6 @@ def main(args, cfg):
     freq_bands = cfg['freq_bands']
     k = cfg['k_folds']
     n_repeats = cfg['n_repeats']
-
-    batch_sizes = cfg['hyperparam_grid']['batch_sizes']
-    learning_rates = cfg['hyperparam_grid']['learning_rates']
-    L2_weight_decays = cfg['hyperparam_grid']['l2_weight_decays']
 
     dataset_path, preprocessed_dir, ch_num, ch_names, show_channel, tasks, metadata, subjects_list, labels_list = build(dataset_name)
     dirs = makedirs(dataset_name)
@@ -137,11 +135,14 @@ def main(args, cfg):
                     else:
                         full_samples = torch.from_numpy(samples).unsqueeze(1).float()   # one big tensor
 
-                    kwargs = model.kwargs.copy()
-                    kwargs['num_classes'] = 3 if task == '3-class' else 2
+                    task_model = replace(model, kwargs={**model.kwargs, 'num_classes': 3 if task == '3-class' else 2})
 
                     full_targets = torch.from_numpy(targets).float()    # one big tensor
                     full_dataset = TensorDataset(full_samples, full_targets)
+                    fold_data = FoldData(dataset=full_dataset, samples=full_samples.numpy(),
+                                         targets=full_targets.numpy(), groups=groups)
+                    ctx = RunContext(dataset_name=dataset_name, task=task, model_spec=task_model,
+                                      iter=i, seed=seed, dirs=dirs, k=k)
 
                     ###############################################################################################################################
 
@@ -154,21 +155,8 @@ def main(args, cfg):
                             best_params = json.load(f)
 
                         print(f"Task: {task}. Model: {model.name}. Iteration: {i + 1}")
-                        seg_acc, sub_acc, sub_sens, sub_spec, sub_prec, sub_f1, gradient = train_10_K_fold(
-                                seed,
-                                dirs,
-                                dataset_name,
-                                task,
-                                model.cls,
-                                model.name,
-                                kwargs,
-                                best_params,
-                                full_dataset,
-                                full_samples.numpy(),
-                                full_targets.numpy(),
-                                groups,
-                                k,
-                                i
+                        seg_acc, sub_acc, sub_sens, sub_spec, sub_prec, sub_f1, gradient = train(
+                                ctx, fold_data, best_params, training=cfg['training']
                             )
 
                         seg_acc_all.append(seg_acc)
@@ -189,20 +177,9 @@ def main(args, cfg):
                     else:
                         print(f"Best parameters file for the iteration {i+1} of {task} and {model.name} doesn't exists! Needs pilot training.")
                         print(f"The pilot training begins. \nTask: {task}. Model: {model.name}. Iteration: {i+1}.")
-                        best_params = train_10_K_fold_pilot(
-                            seed,
-                            task,
-                            model.cls,
-                            model.name,
-                            kwargs,
-                            batch_sizes,
-                            learning_rates,
-                            L2_weight_decays,
-                            full_dataset,
-                            full_samples.numpy(),
-                            full_targets.numpy(),
-                            groups,
-                            k
+                        best_params = train_pilot(
+                            model_spec=task_model, seed=seed, k=k, fold_data=fold_data,
+                            hyperparam_grid=cfg['hyperparam_grid'], training=cfg['training']
                         )
 
                         best_params_file = os.path.join(dirs['best_params_logs_dir'], f"{dataset_name}_{task}_{model.name}_iteration_{i}_best_params_file.json")
@@ -212,21 +189,8 @@ def main(args, cfg):
 
 
                         print(f"Task: {task}. Model: {model.name}. Iteration: {i + 1}")
-                        seg_acc, sub_acc, sub_sens, sub_spec, sub_prec, sub_f1, gradient = train_10_K_fold(
-                                seed,
-                                dirs,
-                                dataset_name,
-                                task,
-                                model.cls,
-                                model.name,
-                                kwargs,
-                                best_params,
-                                full_dataset,
-                                full_samples.numpy(),
-                                full_targets.numpy(),
-                                groups,
-                                k,
-                                i
+                        seg_acc, sub_acc, sub_sens, sub_spec, sub_prec, sub_f1, gradient = train(
+                                ctx, fold_data, best_params, training=cfg['training']
                             )
 
                         seg_acc_all.append(seg_acc)

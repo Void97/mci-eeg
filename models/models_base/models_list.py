@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+from torch.nn import CrossEntropyLoss
+from torch.optim import AdamW, SGD
+
 from models.models_base.Oh_CNN import Oh_CNN
 from models.models_base.EEGNet import EEGnet
 from models.models_base.ShallowConvNet import ShawllowConvNet
@@ -11,7 +14,7 @@ from models.models_base.EEG_CNN import EEG_CNN
 from models.models_base.eeg_conformer import Conformer
 from models.models_base.MultiBranch import MBSzEEGNet
 from models.models_base.eeg_deformer import Deformer
-from models.models_base.MSVTNet import MSVTNet
+from models.models_base.MSVTNet import MSVTNet, JointCrossEntoryLoss
 
 import math
 
@@ -24,10 +27,16 @@ MODEL_NAMES = [
 @dataclass
 class ModelSpec:
     """One entry in the model registry: a name, the class to instantiate,
-    and the constructor kwargs to instantiate it with."""
+    the constructor kwargs to instantiate it with, and the optimizer/loss
+    this model is trained with. Defaults (AdamW, CrossEntropyLoss) cover
+    every model except the two with a documented reason to differ:
+    MBSzEEGNet (SGD) and MSVTNet (JointCrossEntoryLoss, since its forward()
+    returns per-branch auxiliary outputs that only this loss consumes)."""
     name: str
     cls: type
     kwargs: dict[str, Any] = field(default_factory=dict)
+    optimizer_cls: type = AdamW
+    criterion_cls: type = CrossEntropyLoss
 
 
 def models_list(num_classes, num_channels, time_points) -> list[ModelSpec]:
@@ -62,6 +71,7 @@ def models_list(num_classes, num_channels, time_points) -> list[ModelSpec]:
                 'nTime': time_points,
                 'num_classes': num_classes,
             },
+            criterion_cls=JointCrossEntoryLoss,
         ),
 
         ModelSpec(
@@ -132,6 +142,7 @@ def models_list(num_classes, num_channels, time_points) -> list[ModelSpec]:
                 'channels': num_channels,
                 'samples': time_points,
             },
+            optimizer_cls=SGD,
         ),
     ]
 

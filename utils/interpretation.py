@@ -1,8 +1,126 @@
 import os
+import time
 import mne
-import scipy.signal
 import numpy as np
+import scipy.signal
+import torch
+from captum.attr import Saliency
+from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+from sklearn.preprocessing import MinMaxScaler
+
+
+def _class_labels(dataset_name, task):
+    """Human-readable class names for a dataset/task, shared by every plot
+    in this module (PSD, topomap, t-SNE) instead of each re-deriving it."""
+    if dataset_name in ('GENEEG', 'MCIvsHC'):
+        return ('Healthy Controls', 'MCI')
+    if dataset_name == 'ADvsFTDvsHC':
+        return {
+            'AD vs HC': ('Healthy Controls', 'AD'),
+            'FTD vs HC': ('Healthy Controls', 'FTD'),
+            'FTD vs AD': ('FTD', 'AD'),
+        }[task]
+    if dataset_name == 'CAUEEG':
+        return {
+            'Dementia vs Normal': ('Normal', 'Dementia'),
+            'MCI vs Normal': ('Normal', 'MCI'),
+            'MCI vs Dementia': ('MCI', 'Dementia'),
+        }[task]
+    raise ValueError(f"No class labels defined for dataset {dataset_name!r}")
+
+
+def _logits_from_output(out):
+    """Every model except MSVTNet returns a plain logits tensor; MSVTNet
+    (b_preds=True by default) returns (main_logits, branch_logits). Kept as
+    a private copy of models_train.training_loop.logits_from_output to avoid
+    a cross-package import cycle (models_train already imports this module)."""
+    return out[0] if isinstance(out, tuple) else out
+
+
+def _captum_forward_fn(model):
+    def forward(x):
+        return _logits_from_output(model(x))
+    return forward
+
+
+def compute_saliency(model, device, test_loader, test_preds_fold, test_labels_fold):
+    """Gradient-based saliency maps for correctly-classified test samples,
+    grouped by class. Needs its own pass over test_loader with
+    `xb.requires_grad = True`, separate from any no_grad inference pass."""
+    saliency_inst = Saliency(_captum_forward_fn(model))
+    gradient_batches = []
+    for xb, yb in test_loader:
+        xb, yb = xb.to(device), yb.to(device)
+        xb.requires_grad = True
+        target = yb.detach().cpu().long().tolist()
+        gradient_batches.append(
+            saliency_inst.attribute(xb, target=target, abs=False).detach().cpu().numpy()
+        )
+
+    gradient_list = np.concatenate(gradient_batches)
+    if gradient_list.shape[1] == 1:
+        gradient_list = np.squeeze(gradient_list, axis=1)
+
+    saliency_maps = {class_id: [] for class_id in np.unique(test_labels_fold)}
+    for class_id in np.unique(test_labels_fold):
+        correct_indices = np.where(
+            (np.array(test_labels_fold) == class_id) & (np.array(test_preds_fold) == class_id)
+        )[0]
+        if correct_indices.size > 0:
+            saliency_maps[class_id].append(gradient_list[correct_indices])
+    for class_id in saliency_maps:
+        saliency_maps[class_id] = (
+            np.concatenate(saliency_maps[class_id]) if saliency_maps[class_id] else np.array([])
+        )
+    return saliency_maps
+
+
+def save_tsne_plot(model_spec, best_model_state, test_loader, tsne_savedir,
+                    dataset_name, task, iter_, fold, device, n_iter, random_state):
+    class1, class2 = _class_labels(dataset_name, task)
+
+    model = model_spec.cls(**model_spec.kwargs, tsne=True)
+    model.load_state_dict(best_model_state)
+    model.to(device)
+    model.eval()
+
+    features, labels = [], []
+    with torch.no_grad():
+        for xb, yb in test_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            feats = model(xb)
+            features.extend(feats.cpu())
+            labels.extend(np.array(yb.cpu()))
+    features = np.array(features)
+    labels = np.array(labels).reshape(-1, 1)
+
+    tsne = TSNE(n_components=2, n_iter=n_iter, random_state=random_state)
+    features_2d = tsne.fit_transform(features)
+
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    features_norm = scaler.fit_transform(features_2d)
+
+    os.makedirs(tsne_savedir, exist_ok=True)
+
+    plt.figure(figsize=(10, 8))
+    colors = ['blue' if label == 0 else 'red' for label in labels]
+    plt.scatter(
+        [point[0] for point in features_norm],
+        [point[1] for point in features_norm],
+        c=colors,
+        alpha=0.5,
+    )
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', markersize=10, label=class1),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='red', markersize=10, label=class2),
+    ]
+    plt.legend(handles=legend_elements, fontsize=14, loc='upper right')
+    plt.savefig(os.path.join(tsne_savedir, f'{task}_{model_spec.name}_iteration_{iter_}_fold_{fold}_tsne.png'))
+    plt.close()
+    print(f"t-SNE plot saved for fold {fold + 1}")
+
 
 class Interpretation:
     def __init__(self, savedir, sfreq):
@@ -14,23 +132,8 @@ class Interpretation:
     # PSD Plot
     # ---------------------------
     def plot_psd(self, dataset_name, model_name, task, gradient, iter, limit=40):
-        
-        if dataset_name == 'GENEEG' or dataset_name == 'MCIvsHC':
-            classes = ['Healthy Controls', 'MCI']  
-        elif dataset_name == 'ADvsFTDvsHC':
-            if task == 'AD vs HC':
-                classes = ['Healthy Controls', 'AD']
-            elif task == 'FTD vs HC':
-                classes = ['Healthy Controls', 'FTD']
-            elif task == 'FTD vs AD':
-                classes = ['FTD', 'AD']
-        elif dataset_name == 'CAUEEG':
-            if task == 'Dementia vs Normal':
-                classes = ['Normal', 'Dementia']
-            elif task == 'MCI vs Normal':
-                classes = ['Normal', 'MCI']
-            elif task == 'MCI vs Dementia':
-                classes = ['MCI', 'Dementia']
+
+        classes = _class_labels(dataset_name, task)
         limit_freq = min(int(self.sfreq // 2), limit)
 
         fig, ax = plt.subplots(figsize=(18, 5))
@@ -128,24 +231,7 @@ class Interpretation:
         if show_ch_pos.size:
             show_ch_pos[:, 1] += 0.01
 
-    # Keep label names consistent with your PSD plot order if you like
-
-        if dataset_name == 'GENEEG' or dataset_name == 'MCIvsHC':
-            classes = ['Healthy Controls', 'MCI']  # or ['Control', 'MCI'] but be consistent across your code
-        elif dataset_name == 'ADvsFTDvsHC':
-            if task == 'AD vs HC':
-                classes = ['Healthy Controls', 'AD']
-            elif task == 'FTD vs HC':
-                classes = ['Healthy Controls', 'FTD']
-            elif task == 'FTD vs AD':
-                classes = ['FTD', 'AD']
-        elif dataset_name == 'CAUEEG':
-            if task == 'Dementia vs Normal':
-                classes = ['Normal', 'Dementia']
-            elif task == 'MCI vs Normal':
-                classes = ['Normal', 'MCI']
-            elif task == 'MCI vs Dementia':
-                classes = ['MCI', 'Dementia']
+        classes = _class_labels(dataset_name, task)
         freq_range = {
             'delta': [0, 4], 'theta': [4, 8], 'alpha': [8, 12],
             'beta': [12, 30], 'gamma': [30, 45], 'all': [0, 45]
