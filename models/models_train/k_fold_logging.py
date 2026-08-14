@@ -1,20 +1,20 @@
 import numpy as np
 from collections import Counter
 
-def count_fold_subjects(groups, train_val_idx, 
-                        train_idx, val_idx,
-                        test_idx, subject_to_label,
-                        fold):
-    
+def count_fold_subjects(groups, train_idx, val_idx, test_idx, subject_to_label, fold):
+    """train_idx/val_idx/test_idx are absolute indices into `groups`
+    (already resolved through any outer/inner split), not raw sklearn
+    split output relative to an intermediate split."""
+
     def count_subjects_per_class(subjects, subject_to_label):
         labels = [subject_to_label[s] for s in subjects]
-        return dict(Counter(labels))     
-        
+        return dict(Counter(labels))
+
     def keys_to_int(d):
         return {int(k): v for k,v in d.items()}
-    
-    train_subjects = np.unique(groups[train_val_idx][train_idx])
-    val_subjects = np.unique(groups[train_val_idx][val_idx])
+
+    train_subjects = np.unique(groups[train_idx])
+    val_subjects = np.unique(groups[val_idx])
     test_subjects = np.unique(groups[test_idx])
 
     c_train_s = count_subjects_per_class(train_subjects, subject_to_label)
