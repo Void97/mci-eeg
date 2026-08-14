@@ -30,7 +30,7 @@ from models.models_train.training_loop import (
     run_train_epoch, evaluate, run_test_inference,
 )
 from utils.interpretation import compute_saliency, save_tsne_plot
-from utils.tests import test_overlaps
+from utils.leakage_checks import test_overlaps
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +157,11 @@ def get_or_train_fold_model(ctx: RunContext, fold, train_loader, val_loader, bes
         model, model_spec, lr=best_params['learning rate'], weight_decay=best_params['L2 weight decay']
     )
 
-    best_val_acc = 0
+    # -inf (not 0) so the first epoch's state is always captured as a fallback,
+    # even if every epoch happens to score exactly 0.0 val accuracy -- with a
+    # 0 sentinel and a strict '>' comparison, best_model_state could stay None
+    # forever, get silently torch.save()'d as None, and crash on the next load.
+    best_val_acc = float('-inf')
     best_model_state = None
     counter = 0
     epoch_training_times = []
@@ -272,7 +276,10 @@ def finalize_run(ctx: RunContext, fold_metrics_list, k_fold_subjects_logs,
     dataset_name, task, iter_, dirs, k = ctx.dataset_name, ctx.task, ctx.iter, ctx.dirs, ctx.k
     model_name = ctx.model_spec.name
 
-    overall_avg_train_time = sum(all_avg_train_times) / len(all_avg_train_times)
+    # all_avg_train_times can be empty if every fold reused an existing checkpoint --
+    # trained_this_run is False in that case, and update_timing_log below never reads
+    # this value, so 0.0 is just an unused placeholder rather than a real average.
+    overall_avg_train_time = (sum(all_avg_train_times) / len(all_avg_train_times)) if all_avg_train_times else 0.0
     overall_avg_inference_time = sum(all_avg_inference_times) / len(all_avg_inference_times)
     average_peak_gpu_memory = sum(all_peak_memory) / len(all_peak_memory)
     logger.info("=== Overall Averages Across %d Folds ===", k)
@@ -344,7 +351,12 @@ def train(ctx: RunContext, fold_data: FoldData, best_params: dict, training: dic
             ctx, fold, train_loader, val_loader, best_params, training, device
         )
         trained_this_run = trained_this_run or trained_here
-        all_avg_train_times.append(av_epoch_train_time)
+        if trained_here:
+            # Only average over folds actually trained this run -- a reused checkpoint
+            # contributes no training time at all, and folding its 0.0 into the average
+            # would silently understate the true per-epoch training time whenever a run
+            # mixes freshly-trained folds with cached ones.
+            all_avg_train_times.append(av_epoch_train_time)
 
         save_tsne_plot(ctx.model_spec, best_model_state, test_loader, ctx.dirs['tsne_dir'],
                        ctx.dataset_name, ctx.task, ctx.iter, fold, device,

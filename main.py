@@ -23,6 +23,16 @@ from utils.interpretation import *
 
 DATASET_NAMES = ['ADvsFTDvsHC', 'GENEEG', 'CAUEEG', 'MCIvsHC']
 
+REQUIRED_CONFIG_KEYS = {
+    'sfreq', 'freq_bands', 'need_preprocessing', 'k_folds', 'n_repeats',
+    'run_label', 'hyperparam_grid', 'training',
+}
+REQUIRED_HYPERPARAM_GRID_KEYS = {'batch_sizes', 'learning_rates', 'l2_weight_decays'}
+REQUIRED_TRAINING_KEYS = {
+    'patience', 'full_train_max_epochs', 'pilot_max_epochs', 'val_batch_size',
+    'test_batch_size', 'subsample_fraction', 'tsne_n_iter', 'tsne_random_state',
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run the EEG benchmarking pipeline.")
@@ -42,9 +52,29 @@ def parse_args():
     return parser.parse_args()
 
 
+def validate_config(cfg, path):
+    """Fails fast with the exact missing key(s), right where the config was
+    loaded -- instead of a bare KeyError surfacing several function calls
+    deep into training, far from the actual mistake in the YAML file."""
+    missing = REQUIRED_CONFIG_KEYS - cfg.keys()
+    if missing:
+        raise ValueError(f"Config file {path!r} is missing required key(s): {sorted(missing)}")
+
+    missing_hp = REQUIRED_HYPERPARAM_GRID_KEYS - cfg['hyperparam_grid'].keys()
+    if missing_hp:
+        raise ValueError(f"Config file {path!r}: 'hyperparam_grid' is missing required key(s): {sorted(missing_hp)}")
+
+    missing_tr = REQUIRED_TRAINING_KEYS - cfg['training'].keys()
+    if missing_tr:
+        raise ValueError(f"Config file {path!r}: 'training' is missing required key(s): {sorted(missing_tr)}")
+
+    return cfg
+
+
 def load_config(path):
     with open(path, 'r') as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    return validate_config(cfg, path)
 
 
 def main(args, cfg):
